@@ -1,0 +1,1179 @@
+package game
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/kazerdira/wolverix/backend/internal/models"
+)
+
+// ActionResult contains the result of processing an action
+type ActionResult struct {
+	Success     bool
+	Message     string
+	Event       *models.GameEvent
+	Broadcasts  []BroadcastMessage
+	PhaseEnded  bool
+	GameEnded   bool
+	WinningTeam *models.Team
+}
+
+// BroadcastMessage represents a message to broadcast
+type BroadcastMessage struct {
+	Type          models.WSMessageType
+	Payload       interface{}
+	ToPlayers     []uuid.UUID // Empty means broadcast to all
+	ExcludePlayer *uuid.UUID
+}
+
+// ProcessAction processes a player's action during their phase
+func (e *Engine) ProcessAction(ctx context.Context, sessionID, userID uuid.UUID, action models.GameActionRequest) (*ActionResult, error) {
+	// Get current session state
+	session, err := e.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+
+	if session.Status != models.GameStatusActive {
+		return nil, fmt.Errorf("game is not active")
+	}
+
+	// Get player info
+	player, err := e.GetPlayerByUserID(ctx, sessionID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("player not found in session: %w", err)
+	}
+
+	// Validate player can perform action
+	if !player.IsAlive && action.ActionType != models.ActionHunterShoot {
+		return nil, fmt.Errorf("dead players cannot perform actions")
+	}
+
+	// Process action based on type
+	var result *ActionResult
+	switch action.ActionType {
+	case models.ActionWerewolfVote:
+		result, err = e.processWerewolfVote(ctx, session, player, action.TargetID)
+	case models.ActionSeerDivine:
+		result, err = e.processSeerDivine(ctx, session, player, action.TargetID)
+	case models.ActionWitchHeal:
+		result, err = e.processWitchHeal(ctx, session, player)
+	case models.ActionWitchPoison:
+		result, err = e.processWitchPoison(ctx, session, player, action.TargetID)
+	case models.ActionWitchSkip:
+		result, err = e.processWitchSkip(ctx, session, player)
+	case models.ActionBodyguard:
+		result, err = e.processBodyguardProtect(ctx, session, player, action.TargetID)
+	case models.ActionCupidChoose:
+		result, err = e.processCupidChoose(ctx, session, player, action.TargetID, action.Data)
+	case models.ActionVoteLynch:
+		result, err = e.processLynchVote(ctx, session, player, action.TargetID)
+	case models.ActionVoteSkip:
+		result, err = e.processVoteSkip(ctx, session, player)
+	case models.ActionHunterShoot:
+		result, err = e.processHunterShoot(ctx, session, player, action.TargetID)
+	case models.ActionMayorReveal:
+		result, err = e.processMayorReveal(ctx, session, player)
+	default:
+		return nil, fmt.Errorf("unknown action type: %s", action.ActionType)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if phase should end
+	if result != nil && !result.PhaseEnded {
+		phaseEnded, err := e.checkPhaseCompletion(ctx, session)
+		if err == nil && phaseEnded {
+			result.PhaseEnded = true
+		}
+	}
+
+	return result, nil
+}
+
+func (e *Engine) processWerewolfVote(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if player.Role != models.RoleWerewolf {
+		return nil, fmt.Errorf("only werewolves can vote for kills")
+	}
+
+	if session.CurrentPhase != models.GamePhaseNight {
+		return nil, fmt.Errorf("werewolf votes only during night phase")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required for werewolf vote")
+	}
+
+	// Validate target exists and is alive
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot target dead player")
+	}
+
+	if target.Role == models.RoleWerewolf {
+		return nil, fmt.Errorf("werewolves cannot kill other werewolves")
+	}
+
+	// Record the vote in game state
+	if session.State.WerewolfVotes == nil {
+		session.State.WerewolfVotes = make(map[string]string)
+	}
+	session.State.WerewolfVotes[player.ID.String()] = targetID.String()
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionWerewolfVote,
+		TargetPlayerID: targetID,
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	// Check if all werewolves have voted
+	werewolves, _ := e.GetAliveWerewolves(ctx, session.ID)
+	allVoted := len(session.State.WerewolfVotes) >= len(werewolves)
+
+	// Update session state
+	e.UpdateSessionState(ctx, session)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Vote recorded",
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypePlayerAction,
+				Payload: map[string]interface{}{
+					"action":    "werewolf_vote",
+					"player_id": player.ID,
+					"voted":     true,
+				},
+				ToPlayers: getWerewolfPlayerIDs(werewolves),
+			},
+		},
+		PhaseEnded: allVoted,
+	}, nil
+}
+
+func (e *Engine) processSeerDivine(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if player.Role != models.RoleSeer {
+		return nil, fmt.Errorf("only seer can divine")
+	}
+
+	if session.CurrentPhase != models.GamePhaseNight {
+		return nil, fmt.Errorf("seer can only divine during night")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required for divine")
+	}
+
+	// Check if already used this phase
+	if session.State.ActionsCompleted != nil && session.State.ActionsCompleted["seer"] {
+		return nil, fmt.Errorf("seer already divined this night")
+	}
+
+	// Get target's role
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot divine dead player")
+	}
+
+	isWerewolf := target.Role == models.RoleWerewolf
+	result := "villager"
+	if isWerewolf {
+		result = "werewolf"
+	}
+
+	// Update player's divined list
+	player.RoleState.DivinedPlayers = append(player.RoleState.DivinedPlayers, *targetID)
+	e.UpdatePlayerState(ctx, player)
+
+	// Mark seer action as complete
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["seer"] = true
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionSeerDivine,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{Result: result},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	return &ActionResult{
+		Success: true,
+		Message: fmt.Sprintf("Target is %s", result),
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypeRoleReveal,
+				Payload: map[string]interface{}{
+					"target_id":   targetID,
+					"is_werewolf": isWerewolf,
+				},
+				ToPlayers: []uuid.UUID{player.UserID},
+			},
+		},
+	}, nil
+}
+
+func (e *Engine) processWitchHeal(ctx context.Context, session *models.GameSession, player *models.GamePlayer) (*ActionResult, error) {
+	if player.Role != models.RoleWitch {
+		return nil, fmt.Errorf("only witch can heal")
+	}
+
+	if player.RoleState.HealUsed {
+		return nil, fmt.Errorf("heal potion already used")
+	}
+
+	if session.State.LastKilledPlayer == nil {
+		return nil, fmt.Errorf("no one to heal - werewolves haven't chosen a victim yet")
+	}
+
+	// Mark heal as used and save target
+	player.RoleState.HealUsed = true
+	session.State.HealedPlayer = session.State.LastKilledPlayer
+
+	// Mark witch action as complete
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["witch"] = true
+
+	e.UpdatePlayerState(ctx, player)
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionWitchHeal,
+		TargetPlayerID: session.State.LastKilledPlayer,
+		ActionData:     models.ActionData{Result: "healed"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Heal potion used",
+	}, nil
+}
+
+func (e *Engine) processWitchPoison(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if player.Role != models.RoleWitch {
+		return nil, fmt.Errorf("only witch can poison")
+	}
+
+	if player.RoleState.PoisonUsed {
+		return nil, fmt.Errorf("poison already used")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required for poison")
+	}
+
+	// Validate target
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot poison dead player")
+	}
+
+	player.RoleState.PoisonUsed = true
+	session.State.PoisonedPlayer = targetID
+
+	// Mark witch action as complete
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["witch"] = true
+
+	e.UpdatePlayerState(ctx, player)
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionWitchPoison,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{Result: "poisoned"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Poison used",
+	}, nil
+}
+
+func (e *Engine) processWitchSkip(ctx context.Context, session *models.GameSession, player *models.GamePlayer) (*ActionResult, error) {
+	if player.Role != models.RoleWitch {
+		return nil, fmt.Errorf("only witch can skip")
+	}
+
+	// Mark witch action as complete without using potions
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["witch"] = true
+	e.UpdateSessionState(ctx, session)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Witch skipped",
+	}, nil
+}
+
+func (e *Engine) processBodyguardProtect(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if player.Role != models.RoleBodyguard {
+		return nil, fmt.Errorf("only bodyguard can protect")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required for protection")
+	}
+
+	// Check if protected same player last night
+	if player.RoleState.LastProtected != nil && *player.RoleState.LastProtected == *targetID {
+		return nil, fmt.Errorf("cannot protect same player two nights in a row")
+	}
+
+	// Validate target
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot protect dead player")
+	}
+
+	player.RoleState.LastProtected = targetID
+	session.State.ProtectedPlayer = targetID
+
+	// Mark bodyguard action as complete
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["bodyguard"] = true
+
+	e.UpdatePlayerState(ctx, player)
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionBodyguard,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{Result: "protected"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Protection granted",
+	}, nil
+}
+
+func (e *Engine) processCupidChoose(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID, data interface{}) (*ActionResult, error) {
+	if player.Role != models.RoleCupid {
+		return nil, fmt.Errorf("only cupid can choose lovers")
+	}
+
+	if player.RoleState.HasChosen {
+		return nil, fmt.Errorf("lovers already chosen")
+	}
+
+	if session.PhaseNumber != 1 {
+		return nil, fmt.Errorf("cupid can only choose lovers on the first night")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("first lover is required")
+	}
+
+	// Extract second lover from data
+	dataMap, ok := data.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid data format")
+	}
+
+	secondLoverStr, ok := dataMap["second_lover"].(string)
+	if !ok {
+		return nil, fmt.Errorf("second lover is required")
+	}
+
+	secondLoverID, err := uuid.Parse(secondLoverStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid second lover ID")
+	}
+
+	// Validate both targets exist and are alive
+	lover1, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil || !lover1.IsAlive {
+		return nil, fmt.Errorf("first lover not found or not alive")
+	}
+
+	lover2, err := e.GetPlayerByID(ctx, secondLoverID)
+	if err != nil || !lover2.IsAlive {
+		return nil, fmt.Errorf("second lover not found or not alive")
+	}
+
+	if *targetID == secondLoverID {
+		return nil, fmt.Errorf("cannot choose the same player twice")
+	}
+
+	// Set lovers
+	if err := e.SetLovers(ctx, *targetID, secondLoverID); err != nil {
+		return nil, fmt.Errorf("failed to set lovers: %w", err)
+	}
+
+	player.RoleState.HasChosen = true
+	e.UpdatePlayerState(ctx, player)
+
+	// Mark cupid action as complete
+	if session.State.ActionsCompleted == nil {
+		session.State.ActionsCompleted = make(map[string]bool)
+	}
+	session.State.ActionsCompleted["cupid"] = true
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionCupidChoose,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{SecondLover: &secondLoverID, Result: "lovers_chosen"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	// Notify lovers of their bond
+	return &ActionResult{
+		Success: true,
+		Message: "Lovers chosen",
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypeRoleReveal,
+				Payload: map[string]interface{}{
+					"event":    "you_are_lovers",
+					"lover_id": secondLoverID,
+				},
+				ToPlayers: []uuid.UUID{lover1.UserID},
+			},
+			{
+				Type: models.WSTypeRoleReveal,
+				Payload: map[string]interface{}{
+					"event":    "you_are_lovers",
+					"lover_id": *targetID,
+				},
+				ToPlayers: []uuid.UUID{lover2.UserID},
+			},
+		},
+	}, nil
+}
+
+func (e *Engine) processLynchVote(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if session.CurrentPhase != models.GamePhaseVoting {
+		return nil, fmt.Errorf("can only vote during voting phase")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required for lynch vote")
+	}
+
+	// Validate target
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot vote for dead player")
+	}
+
+	// Record vote in game state
+	if session.State.LynchVotes == nil {
+		session.State.LynchVotes = make(map[string]string)
+	}
+	session.State.LynchVotes[player.ID.String()] = targetID.String()
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionVoteLynch,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{Result: "voted"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	// Check if all alive players have voted
+	alivePlayers, _ := e.GetAlivePlayers(ctx, session.ID)
+	allVoted := len(session.State.LynchVotes) >= len(alivePlayers)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Vote recorded",
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypePlayerAction,
+				Payload: map[string]interface{}{
+					"action":    "lynch_vote",
+					"player_id": player.ID,
+					"voted":     true,
+				},
+			},
+		},
+		PhaseEnded: allVoted,
+	}, nil
+}
+
+func (e *Engine) processVoteSkip(ctx context.Context, session *models.GameSession, player *models.GamePlayer) (*ActionResult, error) {
+	if session.CurrentPhase != models.GamePhaseVoting {
+		return nil, fmt.Errorf("can only vote during voting phase")
+	}
+
+	// Record skip vote
+	if session.State.LynchVotes == nil {
+		session.State.LynchVotes = make(map[string]string)
+	}
+	session.State.LynchVotes[player.ID.String()] = "skip"
+	e.UpdateSessionState(ctx, session)
+
+	// Check if all alive players have voted
+	alivePlayers, _ := e.GetAlivePlayers(ctx, session.ID)
+	allVoted := len(session.State.LynchVotes) >= len(alivePlayers)
+
+	return &ActionResult{
+		Success:    true,
+		Message:    "Vote skipped",
+		PhaseEnded: allVoted,
+	}, nil
+}
+
+func (e *Engine) processHunterShoot(ctx context.Context, session *models.GameSession, player *models.GamePlayer, targetID *uuid.UUID) (*ActionResult, error) {
+	if player.Role != models.RoleHunter {
+		return nil, fmt.Errorf("only hunter can shoot")
+	}
+
+	if player.RoleState.HasShot {
+		return nil, fmt.Errorf("hunter has already shot")
+	}
+
+	// Hunter must be dead or dying to shoot
+	if player.IsAlive && !session.State.PendingHunterShot {
+		return nil, fmt.Errorf("hunter can only shoot when dying")
+	}
+
+	if targetID == nil {
+		return nil, fmt.Errorf("target is required")
+	}
+
+	// Validate target
+	target, err := e.GetPlayerByID(ctx, *targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target not found")
+	}
+
+	if !target.IsAlive {
+		return nil, fmt.Errorf("cannot shoot dead player")
+	}
+
+	// Mark shot as used
+	player.RoleState.HasShot = true
+	e.UpdatePlayerState(ctx, player)
+
+	// Kill target
+	deathResult, err := e.KillPlayer(ctx, session, target, "hunter_shot")
+	if err != nil {
+		return nil, err
+	}
+
+	// Clear pending hunter shot
+	session.State.PendingHunterShot = false
+	session.State.HunterPlayerID = nil
+	e.UpdateSessionState(ctx, session)
+
+	// Record action
+	action := &models.GameAction{
+		ID:             uuid.New(),
+		SessionID:      session.ID,
+		PlayerID:       player.ID,
+		PhaseNumber:    session.PhaseNumber,
+		ActionType:     models.ActionHunterShoot,
+		TargetPlayerID: targetID,
+		ActionData:     models.ActionData{Result: "shot"},
+		IsSuccessful:   true,
+	}
+	e.RecordAction(ctx, action)
+
+	result := &ActionResult{
+		Success: true,
+		Message: "Hunter shot fired",
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypePlayerDeath,
+				Payload: map[string]interface{}{
+					"player_id": targetID,
+					"reason":    "hunter_shot",
+					"role":      target.Role,
+				},
+			},
+		},
+	}
+
+	// Check for cascading effects
+	if deathResult != nil {
+		result.Broadcasts = append(result.Broadcasts, deathResult.Broadcasts...)
+		result.GameEnded = deathResult.GameEnded
+		result.WinningTeam = deathResult.WinningTeam
+	}
+
+	return result, nil
+}
+
+func (e *Engine) processMayorReveal(ctx context.Context, session *models.GameSession, player *models.GamePlayer) (*ActionResult, error) {
+	if player.Role != models.RoleMayor {
+		return nil, fmt.Errorf("only mayor can reveal")
+	}
+
+	if player.RoleState.IsRevealed {
+		return nil, fmt.Errorf("mayor already revealed")
+	}
+
+	player.RoleState.IsRevealed = true
+	e.UpdatePlayerState(ctx, player)
+
+	// Record action
+	action := &models.GameAction{
+		ID:           uuid.New(),
+		SessionID:    session.ID,
+		PlayerID:     player.ID,
+		PhaseNumber:  session.PhaseNumber,
+		ActionType:   models.ActionMayorReveal,
+		ActionData:   models.ActionData{Result: "revealed"},
+		IsSuccessful: true,
+	}
+	e.RecordAction(ctx, action)
+
+	return &ActionResult{
+		Success: true,
+		Message: "Mayor revealed",
+		Broadcasts: []BroadcastMessage{
+			{
+				Type: models.WSTypeRoleReveal,
+				Payload: map[string]interface{}{
+					"player_id": player.ID,
+					"role":      "mayor",
+					"public":    true,
+				},
+			},
+		},
+	}, nil
+}
+
+// KillPlayer handles player death and cascading effects
+func (e *Engine) KillPlayer(ctx context.Context, session *models.GameSession, player *models.GamePlayer, reason string) (*ActionResult, error) {
+	result := &ActionResult{
+		Success:    true,
+		Broadcasts: []BroadcastMessage{},
+	}
+
+	// Mark player as dead
+	player.IsAlive = false
+	player.DiedAtPhase = &session.PhaseNumber
+	player.DeathReason = &reason
+	player.CurrentVoiceChannel = "dead"
+	e.UpdatePlayerState(ctx, player)
+
+	// Update alive counts
+	if player.Team == models.TeamWerewolves {
+		session.WerewolvesAlive--
+	} else {
+		session.VillagersAlive--
+	}
+
+	// Record death event
+	event := &models.GameEvent{
+		ID:          uuid.New(),
+		SessionID:   session.ID,
+		PhaseNumber: session.PhaseNumber,
+		EventType:   models.EventPlayerDeath,
+		EventData: models.EventData{
+			PlayerID: &player.ID,
+			Role:     &player.Role,
+			Reason:   reason,
+		},
+		IsPublic: true,
+	}
+	e.RecordEvent(ctx, event)
+
+	// Check for Hunter death trigger
+	if player.Role == models.RoleHunter && !player.RoleState.HasShot {
+		session.State.PendingHunterShot = true
+		session.State.HunterPlayerID = &player.ID
+		result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+			Type: models.WSTypePlayerAction,
+			Payload: map[string]interface{}{
+				"event":     "hunter_trigger",
+				"player_id": player.ID,
+			},
+		})
+	}
+
+	// Check for Lover death cascade
+	if player.LoverID != nil {
+		lover, err := e.GetPlayerByID(ctx, *player.LoverID)
+		if err == nil && lover.IsAlive {
+			// Kill the lover too
+			loverResult, _ := e.KillPlayer(ctx, session, lover, "heartbreak")
+			if loverResult != nil {
+				result.Broadcasts = append(result.Broadcasts, loverResult.Broadcasts...)
+			}
+		}
+	}
+
+	// Update session state
+	e.UpdateSessionState(ctx, session)
+
+	// Check win conditions
+	winResult := e.CheckWinConditions(ctx, session)
+	if winResult != nil {
+		result.GameEnded = true
+		result.WinningTeam = winResult
+	}
+
+	return result, nil
+}
+
+// CheckWinConditions checks if any team has won
+func (e *Engine) CheckWinConditions(ctx context.Context, session *models.GameSession) *models.Team {
+	alivePlayers, _ := e.GetAlivePlayers(ctx, session.ID)
+
+	werewolvesAlive := 0
+	villagersAlive := 0
+	var loversAlive []models.GamePlayer
+
+	for _, p := range alivePlayers {
+		if p.Role == models.RoleWerewolf {
+			werewolvesAlive++
+		} else {
+			villagersAlive++
+		}
+		if p.LoverID != nil {
+			loversAlive = append(loversAlive, p)
+		}
+	}
+
+	// Check Tanner win (handled at lynch time)
+
+	// Check Lovers win - if only the two lovers remain
+	if len(alivePlayers) == 2 && len(loversAlive) == 2 {
+		if loversAlive[0].LoverID != nil && *loversAlive[0].LoverID == loversAlive[1].ID {
+			team := models.TeamLovers
+			e.EndGame(ctx, session.ID, team)
+			return &team
+		}
+	}
+
+	// Werewolves win when they equal or outnumber villagers
+	if werewolvesAlive >= villagersAlive && werewolvesAlive > 0 {
+		team := models.TeamWerewolves
+		e.EndGame(ctx, session.ID, team)
+		return &team
+	}
+
+	// Villagers win when all werewolves are dead
+	if werewolvesAlive == 0 {
+		team := models.TeamVillagers
+		e.EndGame(ctx, session.ID, team)
+		return &team
+	}
+
+	return nil
+}
+
+// checkPhaseCompletion checks if all required actions for current phase are complete
+func (e *Engine) checkPhaseCompletion(ctx context.Context, session *models.GameSession) (bool, error) {
+	if session.State.ActionsCompleted == nil {
+		return false, nil
+	}
+
+	switch session.CurrentPhase {
+	case models.GamePhaseNight:
+		return e.checkNightPhaseComplete(ctx, session)
+	case models.GamePhaseVoting:
+		return e.checkVotingPhaseComplete(ctx, session)
+	}
+
+	return false, nil
+}
+
+func (e *Engine) checkNightPhaseComplete(ctx context.Context, session *models.GameSession) (bool, error) {
+	// Get all alive players with night actions
+	alivePlayers, _ := e.GetAlivePlayers(ctx, session.ID)
+
+	for _, p := range alivePlayers {
+		switch p.Role {
+		case models.RoleWerewolf:
+			// Check if werewolves have reached consensus
+			werewolves, _ := e.GetAliveWerewolves(ctx, session.ID)
+			if len(session.State.WerewolfVotes) < len(werewolves) {
+				return false, nil
+			}
+		case models.RoleCupid:
+			if session.PhaseNumber == 1 && !session.State.ActionsCompleted["cupid"] {
+				return false, nil
+			}
+		case models.RoleSeer:
+			if !session.State.ActionsCompleted["seer"] {
+				return false, nil
+			}
+		case models.RoleBodyguard:
+			if !session.State.ActionsCompleted["bodyguard"] {
+				return false, nil
+			}
+		case models.RoleWitch:
+			if !session.State.ActionsCompleted["witch"] {
+				return false, nil
+			}
+		}
+	}
+
+	return true, nil
+}
+
+func (e *Engine) checkVotingPhaseComplete(ctx context.Context, session *models.GameSession) (bool, error) {
+	alivePlayers, _ := e.GetAlivePlayers(ctx, session.ID)
+	return len(session.State.LynchVotes) >= len(alivePlayers), nil
+}
+
+// TransitionPhase moves the game to the next phase
+func (e *Engine) TransitionPhase(ctx context.Context, session *models.GameSession) (*ActionResult, error) {
+	result := &ActionResult{
+		Success:    true,
+		Broadcasts: []BroadcastMessage{},
+	}
+
+	var nextPhase models.GamePhase
+	now := time.Now()
+
+	switch session.CurrentPhase {
+	case models.GamePhaseNight:
+		// Resolve night actions
+		nightResult, err := e.ResolveNightPhase(ctx, session)
+		if err != nil {
+			return nil, err
+		}
+		if nightResult != nil {
+			result.Broadcasts = append(result.Broadcasts, nightResult.Broadcasts...)
+			result.GameEnded = nightResult.GameEnded
+			result.WinningTeam = nightResult.WinningTeam
+		}
+
+		if result.GameEnded {
+			return result, nil
+		}
+
+		nextPhase = models.GamePhaseDay
+		session.DayNumber++
+
+	case models.GamePhaseDay:
+		nextPhase = models.GamePhaseVoting
+
+	case models.GamePhaseVoting:
+		// Resolve lynch
+		lynchResult, err := e.ResolveLynchVote(ctx, session)
+		if err != nil {
+			return nil, err
+		}
+		if lynchResult != nil {
+			result.Broadcasts = append(result.Broadcasts, lynchResult.Broadcasts...)
+			result.GameEnded = lynchResult.GameEnded
+			result.WinningTeam = lynchResult.WinningTeam
+		}
+
+		if result.GameEnded {
+			return result, nil
+		}
+
+		// Check for pending hunter shot
+		if session.State.PendingHunterShot {
+			nextPhase = models.GamePhaseExecution
+		} else {
+			nextPhase = models.GamePhaseNight
+			session.PhaseNumber++
+		}
+
+	case models.GamePhaseExecution:
+		// After hunter shot, go to night
+		nextPhase = models.GamePhaseNight
+		session.PhaseNumber++
+	}
+
+	// Reset state for new phase
+	session.CurrentPhase = nextPhase
+	session.PhaseStartedAt = now
+	session.State.WerewolfVotes = make(map[string]string)
+	session.State.LynchVotes = make(map[string]string)
+	session.State.ActionsCompleted = make(map[string]bool)
+	session.State.LastKilledPlayer = nil
+	session.State.ProtectedPlayer = nil
+	session.State.PoisonedPlayer = nil
+	session.State.HealedPlayer = nil
+
+	e.UpdateSessionState(ctx, session)
+
+	// Record phase change event
+	event := &models.GameEvent{
+		ID:          uuid.New(),
+		SessionID:   session.ID,
+		PhaseNumber: session.PhaseNumber,
+		EventType:   models.EventPhaseChange,
+		EventData: models.EventData{
+			NewPhase: &nextPhase,
+		},
+		IsPublic: true,
+	}
+	e.RecordEvent(ctx, event)
+
+	result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+		Type: models.WSTypePhaseChange,
+		Payload: map[string]interface{}{
+			"phase":        nextPhase,
+			"phase_number": session.PhaseNumber,
+			"day_number":   session.DayNumber,
+		},
+	})
+
+	return result, nil
+}
+
+// ResolveNightPhase resolves all night actions
+func (e *Engine) ResolveNightPhase(ctx context.Context, session *models.GameSession) (*ActionResult, error) {
+	result := &ActionResult{
+		Success:    true,
+		Broadcasts: []BroadcastMessage{},
+	}
+
+	// Determine werewolf victim (majority vote)
+	var victimID *uuid.UUID
+	if len(session.State.WerewolfVotes) > 0 {
+		voteCounts := make(map[string]int)
+		for _, targetID := range session.State.WerewolfVotes {
+			voteCounts[targetID]++
+		}
+
+		maxVotes := 0
+		for targetID, count := range voteCounts {
+			if count > maxVotes {
+				maxVotes = count
+				id, _ := uuid.Parse(targetID)
+				victimID = &id
+			}
+		}
+	}
+
+	// Apply protection (bodyguard)
+	if victimID != nil && session.State.ProtectedPlayer != nil && *victimID == *session.State.ProtectedPlayer {
+		victimID = nil // Protection saved the victim
+	}
+
+	// Apply witch heal
+	if victimID != nil && session.State.HealedPlayer != nil && *victimID == *session.State.HealedPlayer {
+		victimID = nil // Witch healed the victim
+	}
+
+	// Kill the victim if not saved
+	if victimID != nil {
+		victim, err := e.GetPlayerByID(ctx, *victimID)
+		if err == nil && victim.IsAlive {
+			killResult, _ := e.KillPlayer(ctx, session, victim, "werewolf_kill")
+			if killResult != nil {
+				result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+					Type: models.WSTypePlayerDeath,
+					Payload: map[string]interface{}{
+						"player_id": victimID,
+						"reason":    "werewolf_kill",
+						"role":      victim.Role,
+					},
+				})
+				result.Broadcasts = append(result.Broadcasts, killResult.Broadcasts...)
+				result.GameEnded = killResult.GameEnded
+				result.WinningTeam = killResult.WinningTeam
+			}
+		}
+	}
+
+	// Apply witch poison (poison bypasses protection)
+	if session.State.PoisonedPlayer != nil {
+		poisoned, err := e.GetPlayerByID(ctx, *session.State.PoisonedPlayer)
+		if err == nil && poisoned.IsAlive {
+			killResult, _ := e.KillPlayer(ctx, session, poisoned, "poison")
+			if killResult != nil {
+				result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+					Type: models.WSTypePlayerDeath,
+					Payload: map[string]interface{}{
+						"player_id": session.State.PoisonedPlayer,
+						"reason":    "poison",
+						"role":      poisoned.Role,
+					},
+				})
+				result.Broadcasts = append(result.Broadcasts, killResult.Broadcasts...)
+				if killResult.GameEnded {
+					result.GameEnded = true
+					result.WinningTeam = killResult.WinningTeam
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// ResolveLynchVote tallies votes and executes the lynch
+func (e *Engine) ResolveLynchVote(ctx context.Context, session *models.GameSession) (*ActionResult, error) {
+	result := &ActionResult{
+		Success:    true,
+		Broadcasts: []BroadcastMessage{},
+	}
+
+	if len(session.State.LynchVotes) == 0 {
+		return result, nil
+	}
+
+	// Count votes
+	voteCounts := make(map[string]int)
+	skipVotes := 0
+	for _, targetID := range session.State.LynchVotes {
+		if targetID == "skip" {
+			skipVotes++
+		} else {
+			voteCounts[targetID]++
+		}
+	}
+
+	// Find player with most votes
+	maxVotes := 0
+	var lynchedID *uuid.UUID
+	tied := false
+
+	for targetID, count := range voteCounts {
+		if count > maxVotes {
+			maxVotes = count
+			id, _ := uuid.Parse(targetID)
+			lynchedID = &id
+			tied = false
+		} else if count == maxVotes {
+			tied = true
+		}
+	}
+
+	// Skip wins or tie - no one is lynched
+	if skipVotes >= maxVotes || tied || lynchedID == nil {
+		result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+			Type: models.WSTypePlayerAction,
+			Payload: map[string]interface{}{
+				"event":  "lynch_result",
+				"result": "no_lynch",
+				"reason": map[bool]string{true: "tie", false: "skip_majority"}[tied],
+			},
+		})
+		return result, nil
+	}
+
+	// Lynch the player
+	lynched, err := e.GetPlayerByID(ctx, *lynchedID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for Tanner win
+	if lynched.Role == models.RoleTanner {
+		team := models.TeamNeutral
+		e.EndGame(ctx, session.ID, team)
+		result.GameEnded = true
+		result.WinningTeam = &team
+		result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+			Type: models.WSTypeGameEnd,
+			Payload: map[string]interface{}{
+				"winner":    "tanner",
+				"tanner_id": lynchedID,
+				"message":   "The Tanner wins! They were successfully lynched.",
+			},
+		})
+		return result, nil
+	}
+
+	// Kill the lynched player
+	killResult, _ := e.KillPlayer(ctx, session, lynched, "lynched")
+	if killResult != nil {
+		result.Broadcasts = append(result.Broadcasts, BroadcastMessage{
+			Type: models.WSTypePlayerDeath,
+			Payload: map[string]interface{}{
+				"player_id": lynchedID,
+				"reason":    "lynched",
+				"role":      lynched.Role,
+				"votes":     maxVotes,
+			},
+		})
+		result.Broadcasts = append(result.Broadcasts, killResult.Broadcasts...)
+		result.GameEnded = killResult.GameEnded
+		result.WinningTeam = killResult.WinningTeam
+	}
+
+	return result, nil
+}
+
+// Helper function to get werewolf player IDs
+func getWerewolfPlayerIDs(werewolves []models.GamePlayer) []uuid.UUID {
+	ids := make([]uuid.UUID, len(werewolves))
+	for i, w := range werewolves {
+		ids[i] = w.UserID
+	}
+	return ids
+}

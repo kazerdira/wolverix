@@ -1,0 +1,631 @@
+package game
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/kazerdira/wolverix/backend/internal/models"
+)
+
+// Engine handles all game logic and state management
+type Engine struct {
+	db *pgxpool.Pool
+}
+
+// NewEngine creates a new game engine
+func NewEngine(db *pgxpool.Pool) *Engine {
+	return &Engine{db: db}
+}
+
+// StartGame initializes a new game session from a room
+func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameSession, error) {
+	tx, err := e.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Get room and players
+	var room models.Room
+	var roomConfig json.RawMessage
+	err = tx.QueryRow(ctx, `
+		SELECT id, room_code, name, host_user_id, max_players, current_players, config
+		FROM rooms WHERE id = $1 AND status = 'waiting'
+	`, roomID).Scan(&room.ID, &room.RoomCode, &room.Name, &room.HostUserID,
+		&room.MaxPlayers, &room.CurrentPlayers, &roomConfig)
+	if err != nil {
+		return nil, fmt.Errorf("room not found or not in waiting state: %w", err)
+	}
+
+	if err := json.Unmarshal(roomConfig, &room.Config); err != nil {
+		return nil, fmt.Errorf("failed to parse room config: %w", err)
+	}
+
+	// Get players in room
+	rows, err := tx.Query(ctx, `
+		SELECT rp.user_id, rp.seat_position, u.username
+		FROM room_players rp
+		JOIN users u ON rp.user_id = u.id
+		WHERE rp.room_id = $1 AND rp.left_at IS NULL
+		ORDER BY rp.seat_position
+	`, roomID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get players: %w", err)
+	}
+	defer rows.Close()
+
+	var players []struct {
+		UserID   uuid.UUID
+		Position int
+		Username string
+	}
+
+	for rows.Next() {
+		var p struct {
+			UserID   uuid.UUID
+			Position int
+			Username string
+		}
+		if err := rows.Scan(&p.UserID, &p.Position, &p.Username); err != nil {
+			return nil, fmt.Errorf("failed to scan player: %w", err)
+		}
+		players = append(players, p)
+	}
+
+	if len(players) < 6 {
+		return nil, fmt.Errorf("not enough players to start game (minimum 6, got %d)", len(players))
+	}
+
+	// Assign roles
+	roleAssignments, err := e.assignRoles(players, room.Config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to assign roles: %w", err)
+	}
+
+	// Create game session
+	sessionID := uuid.New()
+	now := time.Now()
+	nightDuration := time.Duration(room.Config.NightPhaseSeconds) * time.Second
+	if nightDuration == 0 {
+		nightDuration = 60 * time.Second // Default 60 seconds
+	}
+	phaseEndsAt := now.Add(nightDuration)
+
+	// Initialize game state - night 1 starts with Cupid (if exists)
+	actionsCompleted := make(map[string]bool)
+	initialState := models.GameState{
+		ActionsCompleted: actionsCompleted,
+		RevealedRoles:    make(map[string]string),
+		WerewolfVotes:    make(map[string]string),
+		LynchVotes:       make(map[string]string),
+		NightKills:       []uuid.UUID{},
+	}
+	stateJSON, _ := json.Marshal(initialState)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO game_sessions (
+			id, room_id, status, current_phase, phase_number, day_number,
+			phase_started_at, phase_ends_at, state, werewolves_alive, villagers_alive
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, sessionID, roomID, models.GameStatusActive, models.GamePhaseNight, 1, 0,
+		now, phaseEndsAt, stateJSON,
+		roleAssignments.WerewolfCount, roleAssignments.VillagerCount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create game session: %w", err)
+	}
+
+	// Insert game players with roles
+	for _, assignment := range roleAssignments.Assignments {
+		roleStateJSON, _ := json.Marshal(assignment.RoleState)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO game_players (
+				id, session_id, user_id, role, team, is_alive, 
+				role_state, current_voice_channel, seat_position
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`, uuid.New(), sessionID, assignment.UserID, assignment.Role, assignment.Team,
+			true, roleStateJSON, "main", assignment.Position)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert game player: %w", err)
+		}
+	}
+
+	// Update room status
+	_, err = tx.Exec(ctx, `
+		UPDATE rooms SET status = 'playing', started_at = $1 WHERE id = $2
+	`, now, roomID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update room status: %w", err)
+	}
+
+	// Create initial event
+	eventData := models.EventData{
+		NewPhase: (*models.GamePhase)(&[]models.GamePhase{models.GamePhaseNight}[0]),
+		Message:  "Night falls on the village. The game begins...",
+	}
+	eventDataJSON, _ := json.Marshal(eventData)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO game_events (id, session_id, phase_number, event_type, event_data, is_public)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, uuid.New(), sessionID, 1, models.EventPhaseChange, eventDataJSON, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create initial event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Return the created session
+	session := &models.GameSession{
+		ID:              sessionID,
+		RoomID:          roomID,
+		Status:          models.GameStatusActive,
+		CurrentPhase:    models.GamePhaseNight,
+		PhaseNumber:     1,
+		DayNumber:       0,
+		PhaseStartedAt:  now,
+		PhaseEndsAt:     &phaseEndsAt,
+		State:           initialState,
+		WerewolvesAlive: roleAssignments.WerewolfCount,
+		VillagersAlive:  roleAssignments.VillagerCount,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	return session, nil
+}
+
+// GetSession retrieves a game session by ID
+func (e *Engine) GetSession(ctx context.Context, sessionID uuid.UUID) (*models.GameSession, error) {
+	var session models.GameSession
+	var stateJSON json.RawMessage
+
+	err := e.db.QueryRow(ctx, `
+		SELECT id, room_id, status, current_phase, phase_number, day_number,
+			phase_started_at, phase_ends_at, state, werewolves_alive, villagers_alive,
+			winning_team, created_at, updated_at, finished_at
+		FROM game_sessions WHERE id = $1
+	`, sessionID).Scan(
+		&session.ID, &session.RoomID, &session.Status, &session.CurrentPhase,
+		&session.PhaseNumber, &session.DayNumber, &session.PhaseStartedAt,
+		&session.PhaseEndsAt, &stateJSON, &session.WerewolvesAlive,
+		&session.VillagersAlive, &session.WinningTeam, &session.CreatedAt,
+		&session.UpdatedAt, &session.FinishedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+
+	if err := json.Unmarshal(stateJSON, &session.State); err != nil {
+		return nil, fmt.Errorf("failed to parse session state: %w", err)
+	}
+
+	// Get players
+	rows, err := e.db.Query(ctx, `
+		SELECT gp.id, gp.session_id, gp.user_id, gp.role, gp.team, gp.is_alive,
+			gp.died_at_phase, gp.death_reason, gp.role_state, gp.lover_id,
+			gp.current_voice_channel, gp.seat_position, gp.joined_at,
+			u.username, u.avatar_url
+		FROM game_players gp
+		JOIN users u ON gp.user_id = u.id
+		WHERE gp.session_id = $1
+		ORDER BY gp.seat_position
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get players: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var player models.GamePlayer
+		var roleStateJSON json.RawMessage
+		var user models.User
+		var avatarURL *string
+
+		err := rows.Scan(
+			&player.ID, &player.SessionID, &player.UserID, &player.Role,
+			&player.Team, &player.IsAlive, &player.DiedAtPhase, &player.DeathReason,
+			&roleStateJSON, &player.LoverID, &player.CurrentVoiceChannel,
+			&player.SeatPosition, &player.JoinedAt, &user.Username, &avatarURL,
+		)
+		if err != nil {
+			continue
+		}
+
+		json.Unmarshal(roleStateJSON, &player.RoleState)
+		user.ID = player.UserID
+		user.AvatarURL = avatarURL
+		player.User = &user
+		session.Players = append(session.Players, player)
+	}
+
+	return &session, nil
+}
+
+// GetPlayerByUserID gets a game player by their user ID
+func (e *Engine) GetPlayerByUserID(ctx context.Context, sessionID, userID uuid.UUID) (*models.GamePlayer, error) {
+	var player models.GamePlayer
+	var roleStateJSON json.RawMessage
+
+	err := e.db.QueryRow(ctx, `
+		SELECT id, session_id, user_id, role, team, is_alive, died_at_phase,
+			death_reason, role_state, lover_id, current_voice_channel, seat_position, joined_at
+		FROM game_players WHERE session_id = $1 AND user_id = $2
+	`, sessionID, userID).Scan(
+		&player.ID, &player.SessionID, &player.UserID, &player.Role, &player.Team,
+		&player.IsAlive, &player.DiedAtPhase, &player.DeathReason, &roleStateJSON,
+		&player.LoverID, &player.CurrentVoiceChannel, &player.SeatPosition, &player.JoinedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("player not found: %w", err)
+	}
+
+	json.Unmarshal(roleStateJSON, &player.RoleState)
+	return &player, nil
+}
+
+// GetPlayerByID gets a game player by their player ID
+func (e *Engine) GetPlayerByID(ctx context.Context, playerID uuid.UUID) (*models.GamePlayer, error) {
+	var player models.GamePlayer
+	var roleStateJSON json.RawMessage
+
+	err := e.db.QueryRow(ctx, `
+		SELECT id, session_id, user_id, role, team, is_alive, died_at_phase,
+			death_reason, role_state, lover_id, current_voice_channel, seat_position, joined_at
+		FROM game_players WHERE id = $1
+	`, playerID).Scan(
+		&player.ID, &player.SessionID, &player.UserID, &player.Role, &player.Team,
+		&player.IsAlive, &player.DiedAtPhase, &player.DeathReason, &roleStateJSON,
+		&player.LoverID, &player.CurrentVoiceChannel, &player.SeatPosition, &player.JoinedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("player not found: %w", err)
+	}
+
+	json.Unmarshal(roleStateJSON, &player.RoleState)
+	return &player, nil
+}
+
+// GetAlivePlayers returns all alive players in a session
+func (e *Engine) GetAlivePlayers(ctx context.Context, sessionID uuid.UUID) ([]models.GamePlayer, error) {
+	rows, err := e.db.Query(ctx, `
+		SELECT id, session_id, user_id, role, team, is_alive, role_state, 
+			lover_id, current_voice_channel, seat_position
+		FROM game_players WHERE session_id = $1 AND is_alive = true
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var players []models.GamePlayer
+	for rows.Next() {
+		var player models.GamePlayer
+		var roleStateJSON json.RawMessage
+
+		err := rows.Scan(
+			&player.ID, &player.SessionID, &player.UserID, &player.Role, &player.Team,
+			&player.IsAlive, &roleStateJSON, &player.LoverID, &player.CurrentVoiceChannel,
+			&player.SeatPosition,
+		)
+		if err != nil {
+			continue
+		}
+		json.Unmarshal(roleStateJSON, &player.RoleState)
+		players = append(players, player)
+	}
+
+	return players, nil
+}
+
+// GetAliveWerewolves returns all alive werewolves
+func (e *Engine) GetAliveWerewolves(ctx context.Context, sessionID uuid.UUID) ([]models.GamePlayer, error) {
+	rows, err := e.db.Query(ctx, `
+		SELECT id, user_id, role FROM game_players 
+		WHERE session_id = $1 AND is_alive = true AND role = 'werewolf'
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var players []models.GamePlayer
+	for rows.Next() {
+		var player models.GamePlayer
+		rows.Scan(&player.ID, &player.UserID, &player.Role)
+		players = append(players, player)
+	}
+	return players, nil
+}
+
+type RoleAssignment struct {
+	UserID    uuid.UUID
+	Role      models.Role
+	Team      models.Team
+	Position  int
+	RoleState models.RoleState
+}
+
+type RoleAssignments struct {
+	Assignments   []RoleAssignment
+	WerewolfCount int
+	VillagerCount int
+}
+
+// assignRoles assigns roles to players based on room configuration
+func (e *Engine) assignRoles(players []struct {
+	UserID   uuid.UUID
+	Position int
+	Username string
+}, config models.RoomConfig) (*RoleAssignments, error) {
+
+	playerCount := len(players)
+	werewolfCount := config.WerewolfCount
+	if werewolfCount == 0 {
+		// Auto-calculate werewolf count based on player count
+		werewolfCount = calculateWerewolfCount(playerCount)
+	}
+
+	// Build role pool - start with werewolves
+	rolePool := make([]models.Role, 0, playerCount)
+	for i := 0; i < werewolfCount; i++ {
+		rolePool = append(rolePool, models.RoleWerewolf)
+	}
+
+	// Add special roles based on config
+	enabledRoles := config.EnabledRoles
+	if len(enabledRoles) == 0 {
+		// Default roles based on player count
+		enabledRoles = getDefaultRoles(playerCount)
+	}
+
+	for _, roleName := range enabledRoles {
+		if len(rolePool) >= playerCount {
+			break
+		}
+		role := models.Role(roleName)
+		// Don't add more werewolves from enabled roles
+		if role != models.RoleWerewolf {
+			rolePool = append(rolePool, role)
+		}
+	}
+
+	// Fill remaining slots with villagers
+	villagersNeeded := playerCount - len(rolePool)
+	for i := 0; i < villagersNeeded; i++ {
+		rolePool = append(rolePool, models.RoleVillager)
+	}
+
+	// Shuffle roles using crypto-safe randomness
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng.Shuffle(len(rolePool), func(i, j int) {
+		rolePool[i], rolePool[j] = rolePool[j], rolePool[i]
+	})
+
+	// Assign roles to players
+	assignments := make([]RoleAssignment, len(players))
+	villagerCount := 0
+	actualWerewolfCount := 0
+
+	for i, player := range players {
+		role := rolePool[i]
+		team := getTeam(role)
+
+		if team == models.TeamVillagers {
+			villagerCount++
+		} else if team == models.TeamWerewolves {
+			actualWerewolfCount++
+		}
+
+		assignments[i] = RoleAssignment{
+			UserID:    player.UserID,
+			Role:      role,
+			Team:      team,
+			Position:  player.Position,
+			RoleState: getInitialRoleState(role),
+		}
+	}
+
+	return &RoleAssignments{
+		Assignments:   assignments,
+		WerewolfCount: actualWerewolfCount,
+		VillagerCount: villagerCount,
+	}, nil
+}
+
+func calculateWerewolfCount(playerCount int) int {
+	switch {
+	case playerCount <= 6:
+		return 1
+	case playerCount <= 9:
+		return 2
+	case playerCount <= 12:
+		return 3
+	case playerCount <= 18:
+		return 4
+	default:
+		return 5
+	}
+}
+
+func getDefaultRoles(playerCount int) []string {
+	// Core roles that should always be included if possible
+	roles := []string{"seer"}
+
+	if playerCount >= 7 {
+		roles = append(roles, "witch")
+	}
+	if playerCount >= 8 {
+		roles = append(roles, "hunter")
+	}
+	if playerCount >= 9 {
+		roles = append(roles, "bodyguard")
+	}
+	if playerCount >= 10 {
+		roles = append(roles, "cupid")
+	}
+	if playerCount >= 12 {
+		roles = append(roles, "medium")
+	}
+
+	return roles
+}
+
+func getTeam(role models.Role) models.Team {
+	switch role {
+	case models.RoleWerewolf:
+		return models.TeamWerewolves
+	case models.RoleTanner:
+		return models.TeamNeutral
+	default:
+		return models.TeamVillagers
+	}
+}
+
+func getInitialRoleState(role models.Role) models.RoleState {
+	state := models.RoleState{}
+	switch role {
+	case models.RoleWitch:
+		state.HealUsed = false
+		state.PoisonUsed = false
+	case models.RoleHunter:
+		state.HasShot = false
+	case models.RoleSeer:
+		state.DivinedPlayers = []uuid.UUID{}
+	case models.RoleCupid:
+		state.HasChosen = false
+	case models.RoleBodyguard:
+		state.LastProtected = nil
+	case models.RoleMayor:
+		state.IsRevealed = false
+	}
+	return state
+}
+
+// UpdateSessionState updates the game state in the database
+func (e *Engine) UpdateSessionState(ctx context.Context, session *models.GameSession) error {
+	stateJSON, err := json.Marshal(session.State)
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	_, err = e.db.Exec(ctx, `
+		UPDATE game_sessions SET 
+			state = $1, current_phase = $2, phase_number = $3, day_number = $4,
+			phase_started_at = $5, phase_ends_at = $6, werewolves_alive = $7,
+			villagers_alive = $8, updated_at = $9
+		WHERE id = $10
+	`, stateJSON, session.CurrentPhase, session.PhaseNumber, session.DayNumber,
+		session.PhaseStartedAt, session.PhaseEndsAt, session.WerewolvesAlive,
+		session.VillagersAlive, time.Now(), session.ID)
+
+	return err
+}
+
+// UpdatePlayerState updates a player's state in the database
+func (e *Engine) UpdatePlayerState(ctx context.Context, player *models.GamePlayer) error {
+	roleStateJSON, err := json.Marshal(player.RoleState)
+	if err != nil {
+		return fmt.Errorf("failed to marshal role state: %w", err)
+	}
+
+	_, err = e.db.Exec(ctx, `
+		UPDATE game_players SET 
+			is_alive = $1, died_at_phase = $2, death_reason = $3,
+			role_state = $4, lover_id = $5, current_voice_channel = $6
+		WHERE id = $7
+	`, player.IsAlive, player.DiedAtPhase, player.DeathReason,
+		roleStateJSON, player.LoverID, player.CurrentVoiceChannel, player.ID)
+
+	return err
+}
+
+// RecordAction records a game action to the database
+func (e *Engine) RecordAction(ctx context.Context, action *models.GameAction) error {
+	actionDataJSON, _ := json.Marshal(action.ActionData)
+
+	_, err := e.db.Exec(ctx, `
+		INSERT INTO game_actions (id, session_id, player_id, phase_number, action_type, 
+			target_player_id, action_data, is_successful, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, action.ID, action.SessionID, action.PlayerID, action.PhaseNumber,
+		action.ActionType, action.TargetPlayerID, actionDataJSON, action.IsSuccessful, time.Now())
+
+	return err
+}
+
+// RecordEvent records a game event
+func (e *Engine) RecordEvent(ctx context.Context, event *models.GameEvent) error {
+	eventDataJSON, _ := json.Marshal(event.EventData)
+
+	_, err := e.db.Exec(ctx, `
+		INSERT INTO game_events (id, session_id, phase_number, event_type, event_data, is_public, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, event.ID, event.SessionID, event.PhaseNumber, event.EventType, eventDataJSON, event.IsPublic, time.Now())
+
+	return err
+}
+
+// SetLovers sets two players as lovers
+func (e *Engine) SetLovers(ctx context.Context, player1ID, player2ID uuid.UUID) error {
+	tx, err := e.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `UPDATE game_players SET lover_id = $1 WHERE id = $2`, player2ID, player1ID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE game_players SET lover_id = $1 WHERE id = $2`, player1ID, player2ID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// EndGame marks the game as finished
+func (e *Engine) EndGame(ctx context.Context, sessionID uuid.UUID, winningTeam models.Team) error {
+	now := time.Now()
+	_, err := e.db.Exec(ctx, `
+		UPDATE game_sessions SET 
+			status = $1, winning_team = $2, finished_at = $3, updated_at = $3
+		WHERE id = $4
+	`, models.GameStatusFinished, winningTeam, now, sessionID)
+
+	if err != nil {
+		return err
+	}
+
+	// Also update the room status
+	_, err = e.db.Exec(ctx, `
+		UPDATE rooms SET status = 'finished', finished_at = $1 
+		WHERE id = (SELECT room_id FROM game_sessions WHERE id = $2)
+	`, now, sessionID)
+
+	return err
+}
+
+// Transaction helper for complex operations
+func (e *Engine) WithTransaction(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	tx, err := e.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
