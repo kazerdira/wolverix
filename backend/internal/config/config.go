@@ -80,12 +80,14 @@ func Load() (*Config, error) {
 		},
 	}
 
-	// Validate required fields
-	if cfg.Agora.AppID == "" {
-		return nil, fmt.Errorf("AGORA_APP_ID is required")
-	}
-	if cfg.Agora.AppCertificate == "" {
-		return nil, fmt.Errorf("AGORA_APP_CERTIFICATE is required")
+	// Validate required fields (only in production)
+	if cfg.Server.Environment == "production" {
+		if cfg.Agora.AppID == "" {
+			return nil, fmt.Errorf("AGORA_APP_ID is required in production")
+		}
+		if cfg.Agora.AppCertificate == "" {
+			return nil, fmt.Errorf("AGORA_APP_CERTIFICATE is required in production")
+		}
 	}
 
 	return cfg, nil

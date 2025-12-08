@@ -115,21 +115,25 @@ class _RoomLobbyScreenState extends State<RoomLobbyScreen> {
               // Voice controls
               _VoiceControls(),
 
-              // Players list
+              // Players grid
               Expanded(
-                child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: GridView.builder(
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    childAspectRatio: 1.0,
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                  ),
                   itemCount: room.players.length,
                   itemBuilder: (context, index) {
                     final player = room.players[index];
-                    return _PlayerTile(
+                    return _PlayerCard(
                       player: player,
                       isHost: player.isHost,
-                      isCurrentUser:
-                          player.userId ==
+                      isCurrentUser: player.userId ==
                           Get.find<StorageService>().getUserId(),
-                      onKick:
-                          room.hostUserId ==
+                      onKick: room.hostUserId ==
                               Get.find<StorageService>().getUserId()
                           ? () => _kickPlayer(player)
                           : null,
@@ -184,9 +188,8 @@ class _RoomLobbyScreenState extends State<RoomLobbyScreen> {
         if (isHost) ...[
           Expanded(
             child: Obx(() {
-              final allReady = room.players
-                  .where((p) => !p.isHost)
-                  .every((p) => p.isReady);
+              final allReady =
+                  room.players.where((p) => !p.isHost).every((p) => p.isReady);
               final enoughPlayers = room.currentPlayers >= 5;
               final canStart = allReady && enoughPlayers;
 
@@ -209,8 +212,8 @@ class _RoomLobbyScreenState extends State<RoomLobbyScreen> {
                         !enoughPlayers
                             ? 'Need ${5 - room.currentPlayers} more players'
                             : !allReady
-                            ? 'Waiting for players'
-                            : 'Start Game',
+                                ? 'Waiting for players'
+                                : 'Start Game',
                       ),
               );
             }),
@@ -423,8 +426,8 @@ class _PlayerTile extends StatelessWidget {
             color: isHost
                 ? WolverixTheme.accentColor
                 : (player.isReady
-                      ? WolverixTheme.successColor
-                      : WolverixTheme.textSecondary),
+                    ? WolverixTheme.successColor
+                    : WolverixTheme.textSecondary),
           ),
         ),
         trailing: onKick != null && !isCurrentUser && !isHost
@@ -434,11 +437,154 @@ class _PlayerTile extends StatelessWidget {
                 onPressed: onKick,
               )
             : (player.isReady && !isHost
-                  ? const Icon(
-                      Icons.check_circle,
-                      color: WolverixTheme.successColor,
-                    )
-                  : null),
+                ? const Icon(
+                    Icons.check_circle,
+                    color: WolverixTheme.successColor,
+                  )
+                : null),
+      ),
+    );
+  }
+}
+
+class _PlayerCard extends StatelessWidget {
+  final RoomPlayer player;
+  final bool isHost;
+  final bool isCurrentUser;
+  final VoidCallback? onKick;
+
+  const _PlayerCard({
+    required this.player,
+    required this.isHost,
+    required this.isCurrentUser,
+    this.onKick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: isCurrentUser
+          ? WolverixTheme.primaryColor.withOpacity(0.1)
+          : WolverixTheme.cardColor,
+      elevation: isCurrentUser ? 4 : 1,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () {},
+        child: Stack(
+          children: [
+            // Main content
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Avatar
+                  Stack(
+                    children: [
+                      CircleAvatar(
+                        radius: 32,
+                        backgroundColor: isHost
+                            ? WolverixTheme.accentColor
+                            : WolverixTheme.primaryColor,
+                        child: Text(
+                          (player.user?.username ?? 'U')
+                              .substring(0, 1)
+                              .toUpperCase(),
+                          style: const TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      if (isHost)
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: const BoxDecoration(
+                              color: WolverixTheme.backgroundColor,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.star,
+                              size: 18,
+                              color: Colors.amber,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  // Username
+                  Text(
+                    player.user?.username ?? 'Player',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  // Status
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: isHost
+                          ? WolverixTheme.accentColor.withOpacity(0.2)
+                          : (player.isReady
+                              ? WolverixTheme.successColor.withOpacity(0.2)
+                              : WolverixTheme.cardColor),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      isHost
+                          ? 'HOST'
+                          : (player.isReady ? 'READY' : 'NOT READY'),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: isHost
+                            ? WolverixTheme.accentColor
+                            : (player.isReady
+                                ? WolverixTheme.successColor
+                                : WolverixTheme.textSecondary),
+                      ),
+                    ),
+                  ),
+                  if (isCurrentUser) ...[
+                    const SizedBox(height: 4),
+                    const Text(
+                      '(You)',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: WolverixTheme.primaryColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // Kick button for host
+            if (onKick != null && !isCurrentUser && !isHost)
+              Positioned(
+                top: 4,
+                right: 4,
+                child: IconButton(
+                  icon: const Icon(Icons.close, size: 20),
+                  color: WolverixTheme.errorColor,
+                  padding: const EdgeInsets.all(4),
+                  constraints: const BoxConstraints(),
+                  onPressed: onKick,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

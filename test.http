@@ -1,0 +1,342 @@
+@baseUrl = http://localhost:8080/api/v1
+
+### Variables - MANUALLY COPY VALUES FROM RESPONSES HERE
+# After login, copy the "token" value from response to @token1, @token2, @token3
+# After create room, copy "room_id" and "room_code" values
+# Example: @token1 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+@token1 = YOUR_TOKEN_HERE
+@token2 = YOUR_TOKEN_HERE
+@token3 = YOUR_TOKEN_HERE
+@userId1 = YOUR_USER_ID_HERE
+@userId2 = YOUR_USER_ID_HERE
+@userId3 = YOUR_USER_ID_HERE
+@roomId = YOUR_ROOM_ID_HERE
+@sessionId = YOUR_SESSION_ID_HERE
+@roomCode = YOUR_ROOM_CODE_HERE 
+
+################################################################################
+# 1. AUTHENTICATION - Create 3 test players
+################################################################################
+
+### Register Player 1
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "player1",
+  "email": "player1@test.com",
+  "password": "password123"
+}
+
+### Login Player 1
+# @name loginPlayer1
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "player1@test.com",
+  "password": "password123"
+}
+
+### Register Player 2
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "player2",
+  "email": "player2@test.com",
+  "password": "password123"
+}
+
+### Login Player 2
+# @name loginPlayer2
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "player2@test.com",
+  "password": "password123"
+}
+
+### Register Player 3
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "player3",
+  "email": "player3@test.com",
+  "password": "password123"
+}
+
+### Login Player 3
+# @name loginPlayer3
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "player3@test.com",
+  "password": "password123"
+}
+
+################################################################################
+# 2. ROOM MANAGEMENT
+################################################################################
+
+### Get Current User (Player 1)
+GET {{baseUrl}}/users/me
+Authorization: Bearer {{token1}}
+
+### Create Room (Player 1 as Host)
+# @name createRoom
+POST {{baseUrl}}/rooms
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "name": "Test Werewolf Game",
+  "is_private": false,
+  "max_players": 10,
+  "language": "en"
+}
+
+### Get All Available Rooms
+GET {{baseUrl}}/rooms
+
+### Join Room (Player 2)
+POST {{baseUrl}}/rooms/join
+Authorization: Bearer {{token2}}
+Content-Type: application/json
+
+{
+  "room_code": "{{roomCode}}"
+}
+
+### Join Room (Player 3)
+POST {{baseUrl}}/rooms/join
+Authorization: Bearer {{token3}}
+Content-Type: application/json
+
+{
+  "room_code": "{{roomCode}}"
+}
+
+### Get Room Details
+GET {{baseUrl}}/rooms/{{roomId}}
+Authorization: Bearer {{token1}}
+
+### Set Player Ready (Player 2)
+POST {{baseUrl}}/rooms/{{roomId}}/ready
+Authorization: Bearer {{token2}}
+Content-Type: application/json
+
+{
+  "is_ready": true
+}
+
+### Set Player Ready (Player 3)
+POST {{baseUrl}}/rooms/{{roomId}}/ready
+Authorization: Bearer {{token3}}
+Content-Type: application/json
+
+{
+  "is_ready": true
+}
+
+### Set Host Ready (Player 1)
+POST {{baseUrl}}/rooms/{{roomId}}/ready
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "is_ready": true
+}
+
+################################################################################
+# 3. START GAME
+################################################################################
+
+### Start Game (Host Only)
+# @name startGame
+POST {{baseUrl}}/rooms/{{roomId}}/start
+Authorization: Bearer {{token1}}
+
+### Get Game State
+GET {{baseUrl}}/games/{{sessionId}}
+Authorization: Bearer {{token1}}
+
+### Get Game History
+GET {{baseUrl}}/games/{{sessionId}}/history
+Authorization: Bearer {{token1}}
+
+################################################################################
+# 4. NIGHT PHASE ACTIONS
+################################################################################
+
+### Werewolf Vote (if player is werewolf)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "action_type": "werewolf_vote",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Seer Divine (if player is seer)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token2}}
+Content-Type: application/json
+
+{
+  "action_type": "seer_divine",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Witch Heal (if player is witch and has heal potion)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token3}}
+Content-Type: application/json
+
+{
+  "action_type": "witch_heal",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Witch Poison (if player is witch and has poison potion)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token3}}
+Content-Type: application/json
+
+{
+  "action_type": "witch_poison",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Bodyguard Protect (if player is bodyguard)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token2}}
+Content-Type: application/json
+
+{
+  "action_type": "bodyguard_protect",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Cupid Choose Lovers (first night only, if player is cupid)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "action_type": "cupid_choose",
+  "target_player_id": "FIRST_LOVER_UUID",
+  "data": {
+    "second_lover": "SECOND_LOVER_UUID"
+  }
+}
+
+################################################################################
+# 5. DAY PHASE ACTIONS
+################################################################################
+
+### Vote to Lynch (during day_voting phase)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "action_type": "lynch_vote",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+### Hunter Shoot (if player is hunter and just died)
+POST {{baseUrl}}/games/{{sessionId}}/action
+Authorization: Bearer {{token2}}
+Content-Type: application/json
+
+{
+  "action_type": "hunter_shoot",
+  "target_player_id": "TARGET_PLAYER_UUID_HERE"
+}
+
+################################################################################
+# 6. AGORA VOICE TOKEN
+################################################################################
+
+### Get Agora Token for Voice Chat
+POST {{baseUrl}}/agora/token
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "channel_name": "room_{{roomId}}",
+  "uid": 0
+}
+
+################################################################################
+# 7. PLAYER MANAGEMENT
+################################################################################
+
+### Get User Stats
+GET {{baseUrl}}/users/{{userId1}}/stats
+Authorization: Bearer {{token1}}
+
+### Update User Profile
+PUT {{baseUrl}}/users/me
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "username": "player1_updated",
+  "avatar_url": "https://example.com/avatar.jpg",
+  "language": "fr"
+}
+
+### Leave Room
+POST {{baseUrl}}/rooms/{{roomId}}/leave
+Authorization: Bearer {{token2}}
+
+### Kick Player (Host Only)
+POST {{baseUrl}}/rooms/{{roomId}}/kick
+Authorization: Bearer {{token1}}
+Content-Type: application/json
+
+{
+  "user_id": "{{userId2}}"
+}
+
+################################################################################
+# TESTING WORKFLOW
+################################################################################
+# 
+# Step 1: Register & Login all 3 players
+#   - Copy each token from login responses to @token1, @token2, @token3
+#   - Copy user_id from responses to @userId1, @userId2, @userId3
+#
+# Step 2: Create room with Player 1
+#   - Copy room_id from response to @roomId
+#   - Copy room_code from response to @roomCode
+#
+# Step 3: Join room with Player 2 & 3
+#   - Use the @roomCode from step 2
+#
+# Step 4: Set all players ready
+#   - All 3 players must be ready
+#
+# Step 5: Start game (Host only)
+#   - Copy session_id from response to @sessionId
+#
+# Step 6: Get game state to see roles
+#   - Check each player's role
+#   - Check current phase
+#
+# Step 7: Perform night actions
+#   - Use appropriate action based on assigned role
+#   - Get target UUIDs from game state
+#
+# Step 8: Wait for phase transitions or test day voting
+#   - The scheduler will auto-advance phases after timeout
+#   - Or perform day voting actions
+#
+################################################################################

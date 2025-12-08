@@ -113,6 +113,9 @@ class Room {
   final String? agoraChannelName;
   final String? agoraAppId;
   final DateTime createdAt;
+  final DateTime? lastActivityAt;
+  final bool? timeoutWarningSent;
+  final int? timeoutExtendedCount;
   final User? host;
   final List<RoomPlayer> players;
 
@@ -130,6 +133,9 @@ class Room {
     this.agoraChannelName,
     this.agoraAppId,
     required this.createdAt,
+    this.lastActivityAt,
+    this.timeoutWarningSent,
+    this.timeoutExtendedCount,
     this.host,
     this.players = const [],
   });
@@ -151,9 +157,13 @@ class Room {
       agoraChannelName: json['agora_channel_name'],
       agoraAppId: json['agora_app_id'],
       createdAt: DateTime.parse(json['created_at']),
+      lastActivityAt: json['last_activity_at'] != null
+          ? DateTime.parse(json['last_activity_at'])
+          : null,
+      timeoutWarningSent: json['timeout_warning_sent'],
+      timeoutExtendedCount: json['timeout_extended_count'],
       host: json['host'] != null ? User.fromJson(json['host']) : null,
-      players:
-          (json['players'] as List<dynamic>?)
+      players: (json['players'] as List<dynamic>?)
               ?.map((p) => RoomPlayer.fromJson(p))
               .toList() ??
           [],
@@ -168,7 +178,8 @@ enum RoomStatus {
   starting,
   playing,
   paused,
-  finished;
+  finished,
+  abandoned;
 
   static RoomStatus fromString(String value) {
     return RoomStatus.values.firstWhere(
@@ -297,8 +308,7 @@ class GameSession {
       winner: json['winner'],
       state: GameState.fromJson(json['state'] ?? {}),
       startedAt: DateTime.parse(json['started_at']),
-      players:
-          (json['players'] as List<dynamic>?)
+      players: (json['players'] as List<dynamic>?)
               ?.map((p) => GamePlayer.fromJson(p))
               .toList() ??
           [],

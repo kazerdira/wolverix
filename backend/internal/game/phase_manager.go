@@ -17,6 +17,7 @@ type PhaseManager struct {
 	deathResolver *DeathResolver
 	winChecker    *WinChecker
 	nightCoord    *NightCoordinator
+	scheduler     *GameScheduler
 }
 
 // NewPhaseManager creates a new phase manager
@@ -26,7 +27,13 @@ func NewPhaseManager(db *pgxpool.Pool, dr *DeathResolver, wc *WinChecker, nc *Ni
 		deathResolver: dr,
 		winChecker:    wc,
 		nightCoord:    nc,
+		// scheduler will be set later via SetScheduler to avoid circular dependency
 	}
+}
+
+// SetScheduler sets the game scheduler (called after Engine initialization)
+func (pm *PhaseManager) SetScheduler(scheduler *GameScheduler) {
+	pm.scheduler = scheduler
 }
 
 // PhaseTransition represents a phase change
@@ -116,10 +123,20 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	// Schedule automatic transition to voting phase (5 minutes)
+	if pm.scheduler != nil {
+		pm.scheduler.SchedulePhaseEnd(sessionID, 5*time.Minute)
+	}
+
 	// Check win conditions AFTER committing (separate transaction)
 	winCondition, err := pm.winChecker.CheckAndFinalizeWin(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check win conditions: %w", err)
+	}
+
+	// Cancel scheduler if game ended
+	if winCondition.GameEnded && pm.scheduler != nil {
+		pm.scheduler.CancelPhaseEnd(sessionID)
 	}
 
 	transition := &PhaseTransition{
@@ -197,6 +214,11 @@ func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.U
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+
+	// Schedule automatic transition to night phase (1 minute voting)
+	if pm.scheduler != nil {
+		pm.scheduler.SchedulePhaseEnd(sessionID, 1*time.Minute)
 	}
 
 	transition := &PhaseTransition{
@@ -286,15 +308,45 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		defer tx.Rollback(ctx)
 	}
 
+	// Get alive players with night action roles
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT role FROM game_players 
+		WHERE session_id = $1 AND is_alive = true 
+		AND role IN ('werewolf', 'seer', 'witch', 'bodyguard', 'cupid')
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get alive roles: %w", err)
+	}
+	defer rows.Close()
+
+	var aliveRoles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, err
+		}
+		// Skip cupid after first night
+		if role == "cupid" && dayNumber > 0 {
+			continue
+		}
+		aliveRoles = append(aliveRoles, role)
+	}
+
+	// Convert to JSON array string
+	rolesJSON, err := json.Marshal(aliveRoles)
+	if err != nil {
+		return nil, err
+	}
+
 	// Update to night phase
 	phaseEndsAt := time.Now().Add(2 * time.Minute) // 2 minute night
 	_, err = tx.Exec(ctx, `
 		UPDATE game_sessions
 		SET current_phase = $1, phase_number = phase_number + 1,
 		    phase_started_at = NOW(), phase_ends_at = $2,
-		    state = jsonb_set(state, '{actions_remaining}', '["werewolf", "seer", "witch", "bodyguard"]')
-		WHERE id = $3
-	`, models.GamePhaseNight, phaseEndsAt, sessionID)
+		    state = jsonb_set(state, '{actions_remaining}', $3::jsonb)
+		WHERE id = $4
+	`, models.GamePhaseNight, phaseEndsAt, rolesJSON, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +377,11 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+
+	// Schedule automatic transition to day phase (2 minute night)
+	if pm.scheduler != nil {
+		pm.scheduler.SchedulePhaseEnd(sessionID, 2*time.Minute)
 	}
 
 	transition := &PhaseTransition{

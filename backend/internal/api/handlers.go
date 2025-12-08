@@ -32,18 +32,26 @@ var upgrader = websocket.Upgrader{
 }
 
 type Handler struct {
-	db           *database.Database
-	gameEngine   *game.Engine
-	agoraService *agora.Service
-	wsHub        *ws.Hub
+	db               *database.Database
+	gameEngine       *game.Engine
+	agoraService     *agora.Service
+	wsHub            *ws.Hub
+	lifecycleManager RoomLifecycleManager
 }
 
-func NewHandler(db *database.Database, gameEngine *game.Engine, agoraService *agora.Service, wsHub *ws.Hub) *Handler {
+// RoomLifecycleManager interface for activity tracking
+type RoomLifecycleManager interface {
+	UpdateActivity(ctx context.Context, roomID uuid.UUID) error
+	ExtendTimeout(ctx context.Context, roomID uuid.UUID, hostUserID uuid.UUID) error
+}
+
+func NewHandler(db *database.Database, gameEngine *game.Engine, agoraService *agora.Service, wsHub *ws.Hub, lifecycleManager RoomLifecycleManager) *Handler {
 	return &Handler{
-		db:           db,
-		gameEngine:   gameEngine,
-		agoraService: agoraService,
-		wsHub:        wsHub,
+		db:               db,
+		gameEngine:       gameEngine,
+		agoraService:     agoraService,
+		wsHub:            wsHub,
+		lifecycleManager: lifecycleManager,
 	}
 }
 
@@ -91,6 +99,30 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 
 	log.Printf("✓ CreateRoom - After defaults: maxPlayers=%d, language=%s", req.MaxPlayers, req.Language)
 
+	ctx := context.Background()
+
+	// Check if user is already in an active room
+	var existingRoomCount int
+	err := h.db.PG.QueryRow(ctx, `
+		SELECT COUNT(*) FROM room_players rp
+		JOIN rooms r ON rp.room_id = r.id
+		WHERE rp.user_id = $1 
+		  AND rp.left_at IS NULL 
+		  AND r.status IN ('waiting', 'in_progress')
+	`, userID).Scan(&existingRoomCount)
+
+	if err != nil && err != sql.ErrNoRows {
+		log.Printf("❌ CreateRoom - Failed to check existing rooms: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify room status"})
+		return
+	}
+
+	if existingRoomCount > 0 {
+		log.Printf("❌ CreateRoom - User %v already in an active room", userID)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before creating a new one"})
+		return
+	}
+
 	// Generate unique room code
 	roomCode := generateRoomCode()
 	roomID := uuid.New()
@@ -105,8 +137,7 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 	configJSON, _ := json.Marshal(req.Config)
 
 	// Create room in database
-	ctx := context.Background()
-	_, err := h.db.PG.Exec(ctx, `
+	_, err = h.db.PG.Exec(ctx, `
 		INSERT INTO rooms (id, room_code, name, host_user_id, is_private, max_players, 
 			current_players, language, config, agora_channel_name, agora_app_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -321,13 +352,23 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
-	// Check if already in room
-	var existingCount int
-	h.db.PG.QueryRow(ctx, `
-		SELECT COUNT(*) FROM room_players WHERE room_id = $1 AND user_id = $2 AND left_at IS NULL
-	`, roomID, userID).Scan(&existingCount)
-	if existingCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "already in room"})
+	// Check if user is already in ANY active room
+	var existingRoomCount int
+	err = h.db.PG.QueryRow(ctx, `
+		SELECT COUNT(*) FROM room_players rp
+		JOIN rooms r ON rp.room_id = r.id
+		WHERE rp.user_id = $1 
+		  AND rp.left_at IS NULL 
+		  AND r.status IN ('waiting', 'in_progress')
+	`, userID).Scan(&existingRoomCount)
+
+	if err != nil && err != sql.ErrNoRows {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify room status"})
+		return
+	}
+
+	if existingRoomCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before joining another"})
 		return
 	}
 
@@ -346,6 +387,11 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 	h.db.PG.Exec(ctx, `
 		UPDATE rooms SET current_players = current_players + 1 WHERE id = $1
 	`, roomID)
+
+	// Track room activity (player joined)
+	if h.lifecycleManager != nil {
+		h.lifecycleManager.UpdateActivity(ctx, roomID)
+	}
 
 	// Broadcast room update
 	h.wsHub.BroadcastToRoom(roomID, models.WSTypeRoomUpdate, gin.H{
@@ -423,6 +469,11 @@ func (h *Handler) SetReady(c *gin.Context) {
 		return
 	}
 
+	// Track room activity (ready status changed)
+	if h.lifecycleManager != nil {
+		h.lifecycleManager.UpdateActivity(ctx, roomID)
+	}
+
 	// Broadcast room update
 	h.wsHub.BroadcastToRoom(roomID, models.WSTypeRoomUpdate, gin.H{
 		"action":  "player_ready",
@@ -489,6 +540,43 @@ func (h *Handler) KickPlayer(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "player kicked"})
 }
 
+// ExtendRoomTimeout allows host to extend the room timeout
+func (h *Handler) ExtendRoomTimeout(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	roomIDStr := c.Param("roomId")
+
+	roomID, err := uuid.Parse(roomIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid room ID"})
+		return
+	}
+
+	ctx := context.Background()
+
+	if h.lifecycleManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "lifecycle manager not available"})
+		return
+	}
+
+	// Extend the timeout
+	err = h.lifecycleManager.ExtendTimeout(ctx, roomID, userID.(uuid.UUID))
+	if err != nil {
+		if err.Error() == "user is not the room host" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "only the host can extend room timeout"})
+		} else if err.Error() == "room is not in waiting status" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "can only extend timeout for waiting rooms"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to extend timeout"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "room timeout extended successfully",
+		"extended_minutes": 20,
+	})
+}
+
 // StartGame starts the game in a room
 func (h *Handler) StartGame(c *gin.Context) {
 	userID, _ := c.Get("user_id")
@@ -520,7 +608,13 @@ func (h *Handler) StartGame(c *gin.Context) {
 	}
 
 	// Get players with their roles to send private role info
-	fullSession, _ := h.gameEngine.GetGameState(ctx, session.ID)
+	fullSession, err := h.gameEngine.GetGameState(ctx, session.ID)
+	if err != nil {
+		log.Printf("⚠️  Failed to get game state after start: %v", err)
+		// Still return success since game was created
+		c.JSON(http.StatusOK, gin.H{"session_id": session.ID})
+		return
+	}
 
 	// Broadcast game start to all players
 	h.wsHub.BroadcastToRoom(roomID, models.WSTypeGameUpdate, gin.H{
@@ -530,14 +624,16 @@ func (h *Handler) StartGame(c *gin.Context) {
 	})
 
 	// Send each player their role privately
-	for _, player := range fullSession.Players {
-		h.wsHub.SendToUser(roomID, player.UserID, models.WSTypeRoleReveal, gin.H{
-			"your_role": player.Role,
-			"your_team": player.Team,
-		})
+	if fullSession.Players != nil {
+		for _, player := range fullSession.Players {
+			h.wsHub.SendToUser(roomID, player.UserID, models.WSTypeRoleReveal, gin.H{
+				"your_role": player.Role,
+				"your_team": player.Team,
+			})
+		}
 	}
 
-	c.JSON(http.StatusOK, session)
+	c.JSON(http.StatusOK, gin.H{"session_id": session.ID})
 }
 
 // ============================================================================

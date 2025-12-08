@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
@@ -20,6 +21,7 @@ type Engine struct {
 	phaseManager  *PhaseManager
 	nightCoord    *NightCoordinator
 	voteManager   *VoteManager
+	scheduler     *GameScheduler
 }
 
 // NewEngine creates a new game engine with all subsystems
@@ -30,7 +32,7 @@ func NewEngine(db *pgxpool.Pool) *Engine {
 	phaseManager := NewPhaseManager(db, deathResolver, winChecker, nightCoord)
 	voteManager := NewVoteManager(db)
 
-	return &Engine{
+	engine := &Engine{
 		db:            db,
 		deathResolver: deathResolver,
 		winChecker:    winChecker,
@@ -38,6 +40,18 @@ func NewEngine(db *pgxpool.Pool) *Engine {
 		nightCoord:    nightCoord,
 		voteManager:   voteManager,
 	}
+
+	// Create scheduler and set it in phase manager (after engine is created to avoid circular dependency)
+	scheduler := NewGameScheduler(db, engine)
+	engine.scheduler = scheduler
+	phaseManager.SetScheduler(scheduler)
+
+	return engine
+}
+
+// GetScheduler returns the game scheduler
+func (e *Engine) GetScheduler() *GameScheduler {
+	return e.scheduler
 }
 
 // StartGame initializes a new game session from a room
@@ -119,17 +133,21 @@ func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameS
 	}
 	stateJSON, _ := json.Marshal(initialState)
 
+	phaseValue := string(models.GamePhaseNight)
+	log.Printf("🔍 DEBUG: About to insert - phase value: '%s', status: '%s'", phaseValue, models.GameStatusActive)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO game_sessions (
 			id, room_id, status, current_phase, phase_number, day_number,
 			phase_started_at, phase_ends_at, state, werewolves_alive, villagers_alive
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, sessionID, roomID, models.GameStatusActive, models.GamePhaseNight, 1, 0,
+	`, sessionID, roomID, models.GameStatusActive, phaseValue, 1, 0,
 		now, phaseEndsAt, stateJSON,
 		roleAssignments.WerewolfCount, roleAssignments.VillagerCount)
 	if err != nil {
+		log.Printf("❌ DEBUG: Insert failed - phase='%s', status='%s', error: %v", phaseValue, models.GameStatusActive, err)
 		return nil, fmt.Errorf("failed to create game session: %w", err)
 	}
+	log.Printf("✅ DEBUG: Game session inserted successfully with phase='%s'", phaseValue)
 
 	// Insert game players with roles
 	for _, assignment := range roleAssignments.Assignments {
@@ -171,6 +189,11 @@ func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameS
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Schedule automatic transition to day phase (2 minute initial night)
+	if e.scheduler != nil {
+		e.scheduler.SchedulePhaseEnd(sessionID, 2*time.Minute)
 	}
 
 	// Return the created session
@@ -259,7 +282,7 @@ func (e *Engine) GetGameState(ctx context.Context, sessionID uuid.UUID) (*models
 	err := e.db.QueryRow(ctx, `
 		SELECT id, room_id, status, current_phase, phase_number, day_number,
 		       phase_started_at, phase_ends_at, state, werewolves_alive, villagers_alive,
-		       winning_team, created_at, updated_at, finished_at
+		       winner, started_at, updated_at, ended_at
 		FROM game_sessions WHERE id = $1
 	`, sessionID).Scan(
 		&session.ID, &session.RoomID, &session.Status, &session.CurrentPhase,
@@ -274,6 +297,55 @@ func (e *Engine) GetGameState(ctx context.Context, sessionID uuid.UUID) (*models
 
 	if err := json.Unmarshal(stateJSON, &session.State); err != nil {
 		return nil, fmt.Errorf("failed to parse state: %w", err)
+	}
+
+	// Load players
+	rows, err := e.db.Query(ctx, `
+		SELECT gp.id, gp.session_id, gp.user_id, gp.role, gp.team, gp.is_alive,
+		       gp.died_at_phase, gp.death_reason, gp.lover_id, gp.current_voice_channel,
+		       gp.seat_position, gp.role_state,
+		       u.username, u.avatar_url
+		FROM game_players gp
+		JOIN users u ON gp.user_id = u.id
+		WHERE gp.session_id = $1
+		ORDER BY gp.seat_position
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load players: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var player models.GamePlayer
+		var roleStateJSON []byte
+		var username string
+		var avatarURL *string
+
+		err := rows.Scan(
+			&player.ID, &player.SessionID, &player.UserID, &player.Role, &player.Team,
+			&player.IsAlive, &player.DiedAtPhase, &player.DeathReason, &player.LoverID,
+			&player.CurrentVoiceChannel, &player.SeatPosition, &roleStateJSON,
+			&username, &avatarURL,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan player: %w", err)
+		}
+
+		// Parse role state
+		if len(roleStateJSON) > 0 {
+			if err := json.Unmarshal(roleStateJSON, &player.RoleState); err != nil {
+				return nil, fmt.Errorf("failed to parse role state: %w", err)
+			}
+		}
+
+		// Set user info
+		player.User = &models.User{
+			ID:        player.UserID,
+			Username:  username,
+			AvatarURL: avatarURL,
+		}
+
+		session.Players = append(session.Players, player)
 	}
 
 	return &session, nil
@@ -315,7 +387,8 @@ func (e *Engine) assignRoles(players []struct {
 	// Add special roles
 	enabledRoles := config.EnabledRoles
 	if len(enabledRoles) == 0 {
-		enabledRoles = []string{"seer", "witch", "hunter", "cupid", "bodyguard"}
+		// TODO: Re-enable hunter once revenge mechanism is implemented
+		enabledRoles = []string{"seer", "witch", "cupid", "bodyguard"}
 	}
 
 	for _, roleName := range enabledRoles {

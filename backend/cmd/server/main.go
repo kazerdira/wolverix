@@ -18,12 +18,15 @@ import (
 	"github.com/kazerdira/wolverix/backend/internal/database"
 	"github.com/kazerdira/wolverix/backend/internal/game"
 	"github.com/kazerdira/wolverix/backend/internal/middleware"
+	"github.com/kazerdira/wolverix/backend/internal/room"
 	"github.com/kazerdira/wolverix/backend/internal/websocket"
 )
 
 func main() {
 	// Load .env file (ignore error in production where env vars are set directly)
-	_ = godotenv.Load()
+	// Try multiple paths to find .env file
+	_ = godotenv.Load("../../.env")
+	_ = godotenv.Load(".env")
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -52,8 +55,23 @@ func main() {
 
 	log.Println("✓ WebSocket hub started")
 
+	// Start game scheduler
+	scheduler := gameEngine.GetScheduler()
+	scheduler.StartPhaseTimeoutChecker()
+
+	// Reschedule any active games (useful for server restarts)
+	if err := scheduler.RescheduleActiveSessions(ctx); err != nil {
+		log.Printf("⚠️  Warning: Failed to reschedule active sessions: %v", err)
+	} else {
+		log.Println("✓ Game scheduler started")
+	}
+
+	// Initialize room lifecycle manager
+	lifecycleManager := room.NewLifecycleManager(db, wsHub)
+	go lifecycleManager.Start(ctx)
+
 	// Initialize API handler
-	handler := api.NewHandler(db, gameEngine, agoraService, wsHub)
+	handler := api.NewHandler(db, gameEngine, agoraService, wsHub, lifecycleManager)
 
 	// Setup Gin router
 	if cfg.Server.Environment == "production" {
@@ -110,6 +128,8 @@ func main() {
 		protected.POST("/rooms/:roomId/leave", handler.LeaveRoom)
 		protected.POST("/rooms/:roomId/ready", handler.SetReady)
 		protected.POST("/rooms/:roomId/kick", handler.KickPlayer)
+		protected.POST("/rooms/:roomId/extend-timeout", handler.ExtendRoomTimeout)
+		protected.POST("/rooms/:roomId/extend", handler.ExtendRoomTimeout) // Alternative route for compatibility
 
 		// Game routes
 		protected.GET("/games/:sessionId", handler.GetGameState)
@@ -143,6 +163,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+
+	// Stop scheduler first
+	scheduler.Stop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()

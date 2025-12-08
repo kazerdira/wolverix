@@ -40,37 +40,45 @@ func (nc *NightCoordinator) ProcessNightActions(ctx context.Context, sessionID u
 	// 4. Bodyguard - protect player
 	// 5. Witch - heal or poison
 
-	// Get werewolf target (majority vote)
+	// COLLECT PHASE: Get all night actions from database
+	// Step 1: Get werewolf target (majority vote)
 	werewolfTarget, err := nc.getWerewolfTarget(ctx, sessionID, phaseNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get werewolf target: %w", err)
 	}
 	results.WerewolfTarget = werewolfTarget
 
-	// Check if target is protected by bodyguard
-	if werewolfTarget != nil {
-		protected, err := nc.isProtected(ctx, sessionID, phaseNumber, *werewolfTarget)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check protection: %w", err)
-		}
-		results.IsProtected = protected
+	// Step 2: Get bodyguard protection target
+	bodyguardTarget, err := nc.getBodyguardTarget(ctx, sessionID, phaseNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bodyguard target: %w", err)
 	}
 
-	// Check if witch healed the target
-	if werewolfTarget != nil && !results.IsProtected {
-		healed, err := nc.isHealed(ctx, sessionID, phaseNumber, *werewolfTarget)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check heal: %w", err)
-		}
-		results.IsHealed = healed
+	// Step 3: Get witch actions
+	witchHealed, err := nc.getWitchHealTarget(ctx, sessionID, phaseNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get witch heal: %w", err)
 	}
 
-	// Get witch poison target
 	poisonTarget, err := nc.getPoisonTarget(ctx, sessionID, phaseNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get poison target: %w", err)
 	}
 	results.PoisonTarget = poisonTarget
+
+	// RESOLVE PHASE: Apply actions in canonical order
+	// Step 4: Check if werewolf target is protected by bodyguard
+	results.IsProtected = false
+	if werewolfTarget != nil && bodyguardTarget != nil {
+		results.IsProtected = (*werewolfTarget == *bodyguardTarget)
+	}
+
+	// Step 5: Check if witch healed (witch sees attack regardless of bodyguard protection)
+	// But heal only works if bodyguard didn't already protect
+	results.IsHealed = false
+	if werewolfTarget != nil && witchHealed && !results.IsProtected {
+		results.IsHealed = true
+	}
 
 	return results, nil
 }
@@ -92,7 +100,7 @@ func (nc *NightCoordinator) GetRequiredActions(ctx context.Context, sessionID uu
 
 	// Convert string actions to roles
 	var required []models.Role
-	for _, action := range state.ActionsRemaining {
+	for action := range state.ActionsRemaining {
 		role := models.Role(action)
 		required = append(required, role)
 	}
@@ -163,6 +171,40 @@ func (nc *NightCoordinator) getWerewolfTarget(ctx context.Context, sessionID uui
 	return nil, nil
 }
 
+func (nc *NightCoordinator) getBodyguardTarget(ctx context.Context, sessionID uuid.UUID, phaseNumber int) (*uuid.UUID, error) {
+	var targetID *uuid.UUID
+	err := nc.db.QueryRow(ctx, `
+		SELECT target_player_id
+		FROM game_actions
+		WHERE session_id = $1 AND phase_number = $2 AND action_type = $3
+		LIMIT 1
+	`, sessionID, phaseNumber, models.ActionBodyguard).Scan(&targetID)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return targetID, nil
+}
+
+func (nc *NightCoordinator) getWitchHealTarget(ctx context.Context, sessionID uuid.UUID, phaseNumber int) (bool, error) {
+	var count int
+	err := nc.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM game_actions
+		WHERE session_id = $1 AND phase_number = $2 AND action_type = $3
+	`, sessionID, phaseNumber, models.ActionWitchHeal).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+
+	// The witch heal is recorded without a target (heals whoever was attacked)
+	// We check if heal was used this night
+	return count > 0, nil
+}
+
+// Deprecated: Use getBodyguardTarget instead
 func (nc *NightCoordinator) isProtected(ctx context.Context, sessionID uuid.UUID, phaseNumber int, playerID uuid.UUID) (bool, error) {
 	var count int
 	err := nc.db.QueryRow(ctx, `
@@ -176,6 +218,7 @@ func (nc *NightCoordinator) isProtected(ctx context.Context, sessionID uuid.UUID
 	return count > 0, nil
 }
 
+// Deprecated: Use getWitchHealTarget instead
 func (nc *NightCoordinator) isHealed(ctx context.Context, sessionID uuid.UUID, phaseNumber int, playerID uuid.UUID) (bool, error) {
 	var count int
 	err := nc.db.QueryRow(ctx, `

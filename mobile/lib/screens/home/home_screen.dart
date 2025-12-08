@@ -64,80 +64,139 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          // Room list header
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Available Rooms',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                Obx(() {
-                  final rooms = Get.find<RoomProvider>().availableRooms;
-                  return Text(
-                    '${rooms.length} rooms',
-                    style: TextStyle(color: WolverixTheme.textSecondary),
-                  );
-                }),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Room list
+          // Tabs for Active/History
           Expanded(
-            child: Obx(() {
-              final roomProvider = Get.find<RoomProvider>();
-
-              if (roomProvider.isLoading.value) {
-                return const Center(child: CircularProgressIndicator());
-              }
-
-              if (roomProvider.availableRooms.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.meeting_room_outlined,
-                        size: 80,
-                        color: WolverixTheme.textHint,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'No rooms available',
-                        style: TextStyle(
-                          fontSize: 18,
-                          color: WolverixTheme.textSecondary,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Create one to start playing!',
-                        style: TextStyle(color: WolverixTheme.textHint),
-                      ),
+            child: DefaultTabController(
+              length: 2,
+              child: Column(
+                children: [
+                  TabBar(
+                    labelColor: WolverixTheme.primaryColor,
+                    unselectedLabelColor: WolverixTheme.textSecondary,
+                    indicatorColor: WolverixTheme.primaryColor,
+                    tabs: const [
+                      Tab(text: 'Active Rooms'),
+                      Tab(text: 'History'),
                     ],
                   ),
-                );
-              }
-
-              return RefreshIndicator(
-                onRefresh: () => roomProvider.fetchRooms(),
-                child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: roomProvider.availableRooms.length,
-                  itemBuilder: (context, index) {
-                    final room = roomProvider.availableRooms[index];
-                    return _RoomCard(room: room);
-                  },
-                ),
-              );
-            }),
+                  Expanded(
+                    child: TabBarView(
+                      children: [
+                        // Active Rooms Tab
+                        _buildActiveRoomsTab(),
+                        // History Tab
+                        _buildHistoryTab(),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildActiveRoomsTab() {
+    return Obx(() {
+      final roomProvider = Get.find<RoomProvider>();
+
+      if (roomProvider.isLoading.value) {
+        return const Center(child: CircularProgressIndicator());
+      }
+
+      final activeRooms = roomProvider.availableRooms
+          .where((r) => r.status == RoomStatus.waiting)
+          .toList();
+
+      if (activeRooms.isEmpty) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.meeting_room_outlined,
+                size: 80,
+                color: WolverixTheme.textHint,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'No active rooms',
+                style: TextStyle(
+                  fontSize: 18,
+                  color: WolverixTheme.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Create one to start playing!',
+                style: TextStyle(color: WolverixTheme.textHint),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return RefreshIndicator(
+        onRefresh: () => roomProvider.fetchRooms(),
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: activeRooms.length,
+          itemBuilder: (context, index) {
+            return _RoomCard(room: activeRooms[index]);
+          },
+        ),
+      );
+    });
+  }
+
+  Widget _buildHistoryTab() {
+    return Obx(() {
+      final roomProvider = Get.find<RoomProvider>();
+
+      if (roomProvider.isLoading.value) {
+        return const Center(child: CircularProgressIndicator());
+      }
+
+      final historyRooms = roomProvider.availableRooms
+          .where((r) => r.status != RoomStatus.waiting)
+          .toList();
+
+      if (historyRooms.isEmpty) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.history,
+                size: 80,
+                color: WolverixTheme.textHint,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'No game history yet',
+                style: TextStyle(
+                  fontSize: 18,
+                  color: WolverixTheme.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return RefreshIndicator(
+        onRefresh: () => roomProvider.fetchRooms(),
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: historyRooms.length,
+          itemBuilder: (context, index) {
+            return _RoomCard(room: historyRooms[index], isHistory: true);
+          },
+        ),
+      );
+    });
   }
 
   void _showProfileSheet() {
@@ -276,21 +335,32 @@ class _ActionButton extends StatelessWidget {
 
 class _RoomCard extends StatelessWidget {
   final Room room;
+  final bool isHistory;
 
-  const _RoomCard({required this.room});
+  const _RoomCard({required this.room, this.isHistory = false});
 
   @override
   Widget build(BuildContext context) {
+    final cardColor = isHistory
+        ? WolverixTheme.cardColor.withOpacity(0.5)
+        : WolverixTheme.cardColor;
+    final iconColor =
+        isHistory ? WolverixTheme.textSecondary : WolverixTheme.primaryColor;
+    final textOpacity = isHistory ? 0.6 : 1.0;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
+      color: cardColor,
       child: InkWell(
-        onTap: () async {
-          final roomProvider = Get.find<RoomProvider>();
-          final success = await roomProvider.joinRoom(room.roomCode);
-          if (success) {
-            Get.toNamed('/room/${room.id}');
-          }
-        },
+        onTap: isHistory
+            ? null
+            : () async {
+                final roomProvider = Get.find<RoomProvider>();
+                final success = await roomProvider.joinRoom(room.roomCode);
+                if (success) {
+                  Get.toNamed('/room/${room.id}');
+                }
+              },
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -301,12 +371,12 @@ class _RoomCard extends StatelessWidget {
                 width: 50,
                 height: 50,
                 decoration: BoxDecoration(
-                  color: WolverixTheme.primaryColor.withOpacity(0.2),
+                  color: iconColor.withOpacity(0.2),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(
-                  Icons.groups,
-                  color: WolverixTheme.primaryColor,
+                child: Icon(
+                  isHistory ? Icons.history : Icons.groups,
+                  color: iconColor,
                 ),
               ),
               const SizedBox(width: 16),
@@ -317,9 +387,11 @@ class _RoomCard extends StatelessWidget {
                   children: [
                     Text(
                       room.name,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
+                        color:
+                            WolverixTheme.textPrimary.withOpacity(textOpacity),
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -327,9 +399,21 @@ class _RoomCard extends StatelessWidget {
                       'Host: ${room.host?.username ?? "Unknown"}',
                       style: TextStyle(
                         fontSize: 14,
-                        color: WolverixTheme.textSecondary,
+                        color: WolverixTheme.textSecondary
+                            .withOpacity(textOpacity),
                       ),
                     ),
+                    if (isHistory) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        room.status.name.toUpperCase(),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: WolverixTheme.textHint,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -339,16 +423,18 @@ class _RoomCard extends StatelessWidget {
                 children: [
                   Text(
                     '${room.currentPlayers}/${room.maxPlayers}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
+                      color: WolverixTheme.textPrimary.withOpacity(textOpacity),
                     ),
                   ),
                   Text(
                     'players',
                     style: TextStyle(
                       fontSize: 12,
-                      color: WolverixTheme.textSecondary,
+                      color:
+                          WolverixTheme.textSecondary.withOpacity(textOpacity),
                     ),
                   ),
                 ],

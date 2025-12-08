@@ -184,12 +184,17 @@ class ApiService extends getx.GetxService {
     return GameSession.fromJson(response.data);
   }
 
+  Future<Map<String, dynamic>> extendRoomTimeout(String roomId) async {
+    final response = await _dio.post('/rooms/$roomId/extend');
+    return response.data;
+  }
+
   // ============================================================================
   // GAME ENDPOINTS
   // ============================================================================
 
   Future<GameSession> getGameState(String sessionId) async {
-    final response = await _dio.get('/game/$sessionId');
+    final response = await _dio.get('/games/$sessionId');
     return GameSession.fromJson(response.data);
   }
 
@@ -197,21 +202,30 @@ class ApiService extends getx.GetxService {
     String sessionId, {
     required String actionType,
     String? targetPlayerId,
-    String? secondaryTargetId,
+    Map<String, dynamic>? data,
   }) async {
+    final requestData = <String, dynamic>{
+      'action_type': actionType,
+    };
+
+    if (targetPlayerId != null) {
+      requestData['target_player_id'] = targetPlayerId;
+    }
+
+    // Merge additional data (for Cupid's second target, etc.)
+    if (data != null) {
+      requestData['data'] = data;
+    }
+
     final response = await _dio.post(
-      '/game/$sessionId/action',
-      data: {
-        'action_type': actionType,
-        'target_player_id': targetPlayerId,
-        'secondary_target_id': secondaryTargetId,
-      },
+      '/games/$sessionId/action',
+      data: requestData,
     );
     return response.data;
   }
 
   Future<List<GameEvent>> getGameHistory(String sessionId) async {
-    final response = await _dio.get('/game/$sessionId/history');
+    final response = await _dio.get('/games/$sessionId/history');
     return (response.data as List).map((e) => GameEvent.fromJson(e)).toList();
   }
 

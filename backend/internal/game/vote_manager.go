@@ -22,12 +22,12 @@ func NewVoteManager(db *pgxpool.Pool) *VoteManager {
 
 // VoteResult contains the outcome of a vote
 type VoteResult struct {
-	LynchedPlayerID *uuid.UUID              // nil if no one lynched
-	VoteCounts      map[uuid.UUID]int       // player ID -> vote count
+	LynchedPlayerID *uuid.UUID        // nil if no one lynched
+	VoteCounts      map[uuid.UUID]int // player ID -> vote count
 	TotalVotes      int
 	WasTie          bool
-	TiePlayerIDs    []uuid.UUID             // Players tied for most votes
-	TieBreaker      *uuid.UUID              // Who broke the tie (e.g., Mayor)
+	TiePlayerIDs    []uuid.UUID // Players tied for most votes
+	TieBreaker      *uuid.UUID  // Who broke the tie (e.g., Mayor)
 }
 
 // CastVote records a player's lynch vote
@@ -71,12 +71,21 @@ func (vm *VoteManager) CastVote(ctx context.Context, sessionID, voterID, targetI
 		return fmt.Errorf("cannot vote for dead players")
 	}
 
+	// Get player ID (not user ID) for the voter
+	var playerID uuid.UUID
+	err = vm.db.QueryRow(ctx, `
+		SELECT id FROM game_players WHERE session_id = $1 AND user_id = $2
+	`, sessionID, voterID).Scan(&playerID)
+	if err != nil {
+		return fmt.Errorf("failed to get player ID: %w", err)
+	}
+
 	// Delete any existing vote from this voter (allow vote changes)
 	_, err = vm.db.Exec(ctx, `
 		DELETE FROM game_actions
-		WHERE session_id = $1 AND user_id = (SELECT user_id FROM game_players WHERE session_id = $1 AND user_id = $2)
+		WHERE session_id = $1 AND player_id = $2
 		      AND phase_number = $3 AND action_type = $4
-	`, sessionID, voterID, phaseNumber, models.ActionVoteLynch)
+	`, sessionID, playerID, phaseNumber, models.ActionVoteLynch)
 	if err != nil {
 		return fmt.Errorf("failed to clear old vote: %w", err)
 	}
@@ -84,12 +93,6 @@ func (vm *VoteManager) CastVote(ctx context.Context, sessionID, voterID, targetI
 	// Record new vote
 	actionData := models.ActionData{Result: "voted"}
 	actionDataJSON, _ := json.Marshal(actionData)
-
-	// Get player ID (not user ID) for the voter
-	var playerID uuid.UUID
-	err = vm.db.QueryRow(ctx, `
-		SELECT id FROM game_players WHERE session_id = $1 AND user_id = $2
-	`, sessionID, voterID).Scan(&playerID)
 	if err != nil {
 		return err
 	}

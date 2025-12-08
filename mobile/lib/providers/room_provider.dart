@@ -32,7 +32,16 @@ class RoomProvider extends GetxController {
     _wsSubscription = _ws.messageStream.listen((message) {
       switch (message.type) {
         case 'room_update':
-          _handleRoomUpdate(message.payload);
+          final action = message.payload['action'];
+          if (action == 'timeout_warning') {
+            _handleTimeoutWarning(message.payload);
+          } else if (action == 'room_closed') {
+            _handleRoomClosed(message.payload);
+          } else if (action == 'timeout_extended') {
+            _handleTimeoutExtended(message.payload);
+          } else {
+            _handleRoomUpdate(message.payload);
+          }
           break;
         case 'player_joined':
           _handlePlayerJoined(message.payload);
@@ -88,7 +97,12 @@ class RoomProvider extends GetxController {
 
       return room;
     } catch (e) {
-      errorMessage.value = 'Failed to create room';
+      if (e.toString().contains('already in an active room')) {
+        errorMessage.value =
+            'You are already in an active room. Please leave it first.';
+      } else {
+        errorMessage.value = 'Failed to create room';
+      }
       return null;
     } finally {
       isLoading.value = false;
@@ -115,6 +129,9 @@ class RoomProvider extends GetxController {
         errorMessage.value = 'Room not found';
       } else if (e.toString().contains('full')) {
         errorMessage.value = 'Room is full';
+      } else if (e.toString().contains('already in an active room')) {
+        errorMessage.value =
+            'You are already in an active room. Please leave it first.';
       } else {
         errorMessage.value = 'Failed to join room';
       }
@@ -168,6 +185,34 @@ class RoomProvider extends GetxController {
       return null;
     } finally {
       isLoading.value = false;
+    }
+  }
+
+  Future<bool> extendRoomTimeout() async {
+    if (currentRoom.value == null) return false;
+
+    try {
+      await _api.extendRoomTimeout(currentRoom.value!.id);
+      Get.snackbar(
+        'Success',
+        'Room timeout extended',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return true;
+    } catch (e) {
+      if (e.toString().contains('403')) {
+        errorMessage.value = 'Only the host can extend room timeout';
+      } else if (e.toString().contains('not in waiting')) {
+        errorMessage.value = 'Can only extend timeout for waiting rooms';
+      } else {
+        errorMessage.value = 'Failed to extend room timeout';
+      }
+      Get.snackbar(
+        'Error',
+        errorMessage.value,
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return false;
     }
   }
 
@@ -230,6 +275,9 @@ class RoomProvider extends GetxController {
         agoraChannelName: currentRoom.value!.agoraChannelName,
         agoraAppId: currentRoom.value!.agoraAppId,
         createdAt: currentRoom.value!.createdAt,
+        lastActivityAt: currentRoom.value!.lastActivityAt,
+        timeoutWarningSent: currentRoom.value!.timeoutWarningSent,
+        timeoutExtendedCount: currentRoom.value!.timeoutExtendedCount,
         host: currentRoom.value!.host,
         players: players,
       );
@@ -253,6 +301,49 @@ class RoomProvider extends GetxController {
   void _handleGameStarted(Map<String, dynamic> payload) {
     final sessionId = payload['session_id'] as String;
     Get.toNamed('/game/$sessionId');
+  }
+
+  void _handleTimeoutWarning(Map<String, dynamic> payload) {
+    final minutesLeft = payload['minutes_left'] as int?;
+    final message = payload['message'] as String? ??
+        'Room will close in $minutesLeft minutes due to inactivity';
+
+    Get.snackbar(
+      'Room Timeout Warning',
+      message,
+      snackPosition: SnackPosition.TOP,
+      duration: const Duration(seconds: 10),
+      backgroundColor: Get.theme.colorScheme.errorContainer,
+      colorText: Get.theme.colorScheme.onErrorContainer,
+    );
+  }
+
+  void _handleRoomClosed(Map<String, dynamic> payload) {
+    final reason = payload['reason'] as String?;
+    final message = payload['message'] as String? ?? 'Room has been closed';
+
+    currentRoom.value = null;
+    _ws.disconnect();
+
+    Get.offAllNamed('/home');
+    Get.snackbar(
+      'Room Closed',
+      message,
+      snackPosition: SnackPosition.TOP,
+      duration: const Duration(seconds: 5),
+      backgroundColor: Get.theme.colorScheme.errorContainer,
+      colorText: Get.theme.colorScheme.onErrorContainer,
+    );
+  }
+
+  void _handleTimeoutExtended(Map<String, dynamic> payload) {
+    Get.snackbar(
+      'Timeout Extended',
+      'Host extended the room timeout',
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 3),
+    );
+    refreshRoom();
   }
 
   String _extractStartGameError(dynamic error) {

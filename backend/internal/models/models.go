@@ -53,23 +53,26 @@ type UserStats struct {
 // ============================================================================
 
 type Room struct {
-	ID               uuid.UUID  `json:"id"`
-	RoomCode         string     `json:"room_code"`
-	Name             string     `json:"name"`
-	HostUserID       uuid.UUID  `json:"host_user_id"`
-	Status           RoomStatus `json:"status"`
-	IsPrivate        bool       `json:"is_private"`
-	PasswordHash     *string    `json:"-"`
-	MaxPlayers       int        `json:"max_players"`
-	CurrentPlayers   int        `json:"current_players"`
-	Language         string     `json:"language"`
-	Config           RoomConfig `json:"config"`
-	AgoraChannelName string     `json:"agora_channel_name"`
-	AgoraAppID       *string    `json:"agora_app_id,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ID                   uuid.UUID  `json:"id"`
+	RoomCode             string     `json:"room_code"`
+	Name                 string     `json:"name"`
+	HostUserID           uuid.UUID  `json:"host_user_id"`
+	Status               RoomStatus `json:"status"`
+	IsPrivate            bool       `json:"is_private"`
+	PasswordHash         *string    `json:"-"`
+	MaxPlayers           int        `json:"max_players"`
+	CurrentPlayers       int        `json:"current_players"`
+	Language             string     `json:"language"`
+	Config               RoomConfig `json:"config"`
+	AgoraChannelName     string     `json:"agora_channel_name"`
+	AgoraAppID           *string    `json:"agora_app_id,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	FinishedAt           *time.Time `json:"finished_at,omitempty"`
+	LastActivityAt       time.Time  `json:"last_activity_at"`
+	TimeoutWarningSent   bool       `json:"timeout_warning_sent"`
+	TimeoutExtendedCount int        `json:"timeout_extended_count"`
 
 	// Joined data (not in DB)
 	Host    *User        `json:"host,omitempty"`
@@ -79,9 +82,10 @@ type Room struct {
 type RoomStatus string
 
 const (
-	RoomStatusWaiting  RoomStatus = "waiting"
-	RoomStatusPlaying  RoomStatus = "playing"
-	RoomStatusFinished RoomStatus = "finished"
+	RoomStatusWaiting   RoomStatus = "waiting"
+	RoomStatusPlaying   RoomStatus = "playing"
+	RoomStatusFinished  RoomStatus = "finished"
+	RoomStatusAbandoned RoomStatus = "abandoned"
 )
 
 type RoomConfig struct {
@@ -144,12 +148,27 @@ const (
 type GamePhase string
 
 const (
-	GamePhaseNight       GamePhase = "night"
-	GamePhaseNightAction GamePhase = "night_action"
-	GamePhaseDay         GamePhase = "day"
-	GamePhaseDiscussion  GamePhase = "discussion"
-	GamePhaseVoting      GamePhase = "voting"
-	GamePhaseExecution   GamePhase = "execution"
+	GamePhaseNight0        GamePhase = "night_0"
+	GamePhaseCupid         GamePhase = "cupid_phase"
+	GamePhaseWerewolf      GamePhase = "werewolf_phase"
+	GamePhaseSeer          GamePhase = "seer_phase"
+	GamePhaseWitch         GamePhase = "witch_phase"
+	GamePhaseBodyguard     GamePhase = "bodyguard_phase"
+	GamePhaseDayDiscussion GamePhase = "day_discussion"
+	GamePhaseDayVoting     GamePhase = "day_voting"
+	GamePhaseDefense       GamePhase = "defense_phase"
+	GamePhaseFinalVote     GamePhase = "final_vote"
+	GamePhaseHunter        GamePhase = "hunter_phase"
+	GamePhaseMayorReveal   GamePhase = "mayor_reveal"
+	GamePhaseGameOver      GamePhase = "game_over"
+
+	// Aliases for backward compatibility
+	GamePhaseNight       = GamePhaseNight0
+	GamePhaseNightAction = GamePhaseWerewolf
+	GamePhaseDay         = GamePhaseDayDiscussion
+	GamePhaseDiscussion  = GamePhaseDayDiscussion
+	GamePhaseVoting      = GamePhaseDayVoting
+	GamePhaseExecution   = GamePhaseDefense
 )
 
 type GameState struct {

@@ -23,7 +23,7 @@ func (e *Engine) processWerewolfVote(ctx context.Context, sessionID, userID uuid
 	}
 
 	if player.Role != models.RoleWerewolf {
-		return fmt.Errorf("only werewolves can vote for kills")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -46,7 +46,7 @@ func (e *Engine) processWerewolfVote(ctx context.Context, sessionID, userID uuid
 	}
 
 	if target.Team == models.TeamWerewolves {
-		return fmt.Errorf("werewolves cannot target each other")
+		return fmt.Errorf("invalid target")
 	}
 
 	// Get phase number
@@ -83,7 +83,7 @@ func (e *Engine) processSeerDivine(ctx context.Context, sessionID, userID uuid.U
 	}
 
 	if player.Role != models.RoleSeer {
-		return fmt.Errorf("only seer can divine")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -154,7 +154,7 @@ func (e *Engine) processWitchHeal(ctx context.Context, sessionID, userID uuid.UU
 	}
 
 	if player.Role != models.RoleWitch {
-		return fmt.Errorf("only witch can heal")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -221,7 +221,7 @@ func (e *Engine) processWitchPoison(ctx context.Context, sessionID, userID uuid.
 	}
 
 	if player.Role != models.RoleWitch {
-		return fmt.Errorf("only witch can poison")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -282,7 +282,7 @@ func (e *Engine) processBodyguardProtect(ctx context.Context, sessionID, userID 
 	}
 
 	if player.Role != models.RoleBodyguard {
-		return fmt.Errorf("only bodyguard can protect")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -352,7 +352,7 @@ func (e *Engine) processCupidChoose(ctx context.Context, sessionID, userID uuid.
 	}
 
 	if player.Role != models.RoleCupid {
-		return fmt.Errorf("only cupid can choose lovers")
+		return fmt.Errorf("invalid action")
 	}
 
 	if !player.IsAlive {
@@ -397,20 +397,25 @@ func (e *Engine) processCupidChoose(ctx context.Context, sessionID, userID uuid.
 		return err
 	}
 
-	// Set both players as lovers
+	// Set both players as lovers AND change their team to TeamLovers
 	_, err = e.db.Exec(ctx, `
-		UPDATE game_players SET lover_id = $1 WHERE session_id = $2 AND id = $3
-	`, target2.ID, sessionID, target1.ID)
+		UPDATE game_players SET lover_id = $1, team = $2 WHERE session_id = $3 AND id = $4
+	`, target2.ID, models.TeamLovers, sessionID, target1.ID)
 	if err != nil {
 		return err
 	}
 
 	_, err = e.db.Exec(ctx, `
-		UPDATE game_players SET lover_id = $1 WHERE session_id = $2 AND id = $3
-	`, target1.ID, sessionID, target2.ID)
+		UPDATE game_players SET lover_id = $1, team = $2 WHERE session_id = $3 AND id = $4
+	`, target1.ID, models.TeamLovers, sessionID, target2.ID)
 	if err != nil {
 		return err
 	}
+
+	// Note: We don't update werewolves_alive/villagers_alive here because:
+	// 1. Lovers still count towards their original team for win conditions
+	// 2. They maintain their original role (werewolf/villager)
+	// 3. Only when checking for lovers win condition do we check if last 2 alive are both lovers
 
 	// Mark cupid action as complete
 	player.RoleState.HasChosen = true

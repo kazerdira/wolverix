@@ -1,0 +1,79 @@
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Binaries and executables
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+backend/cmd/server/server
+backend/cmd/test-client/test-client
+backend/cmd/game-logic-test/game-logic-test
+
+# Keys and certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+agora_certificate
+agora_app_id
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+*.out
+coverage.txt
+coverage.html
+
+# Flutter/Dart
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/build/
+mobile/pubspec.lock
+mobile/ios/Flutter/.last_build_id
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/android/.gradle/
+mobile/android/app/debug/
+mobile/android/app/profile/
+mobile/android/app/release/
+mobile/android/local.properties
+mobile/android/.idea/
+mobile/linux/flutter/ephemeral/
+mobile/macos/Flutter/ephemeral/
+mobile/windows/flutter/ephemeral/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Test coverage
+*.coverprofile

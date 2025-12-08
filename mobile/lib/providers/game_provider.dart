@@ -43,23 +43,25 @@ class GameProvider extends GetxController {
         case 'phase_change':
           _handlePhaseChange(message.payload);
           break;
-        case 'player_killed':
-          _handlePlayerKilled(message.payload);
+        case 'player_death': // Backend uses 'player_death' not 'player_killed'
+          _handlePlayerDeath(message.payload);
           break;
         case 'role_reveal':
           _handleRoleReveal(message.payload);
           break;
-        case 'seer_result':
-          _handleSeerResult(message.payload);
+        case 'timer': // Backend sends 'timer' for phase countdowns
+          _handleTimer(message.payload);
           break;
-        case 'vote_update':
-          _handleVoteUpdate(message.payload);
+        case 'player_action': // Backend sends action notifications
+          _handlePlayerAction(message.payload);
           break;
         case 'game_end':
           _handleGameEnd(message.payload);
           break;
-        case 'action_result':
-          _handleActionResult(message.payload);
+        case 'error':
+          _handleError(message.payload);
+          break;
+        case 'pong': // Handle ping/pong
           break;
       }
     });
@@ -95,7 +97,7 @@ class GameProvider extends GetxController {
   Future<bool> performAction({
     required String actionType,
     String? targetPlayerId,
-    String? secondaryTargetId,
+    Map<String, dynamic>? data,
   }) async {
     if (session.value == null) return false;
 
@@ -104,7 +106,7 @@ class GameProvider extends GetxController {
         session.value!.id,
         actionType: actionType,
         targetPlayerId: targetPlayerId,
-        secondaryTargetId: secondaryTargetId,
+        data: data,
       );
 
       if (result['success'] == true) {
@@ -163,7 +165,9 @@ class GameProvider extends GetxController {
     return performAction(
       actionType: 'cupid_choose',
       targetPlayerId: lover1Id,
-      secondaryTargetId: lover2Id,
+      data: {
+        'second_lover': lover2Id
+      }, // Backend expects second lover in data field
     );
   }
 
@@ -203,68 +207,6 @@ class GameProvider extends GetxController {
         players: session.value!.players,
       );
       _updatePhaseTimer();
-    }
-  }
-
-  void _handlePlayerKilled(Map<String, dynamic> payload) {
-    final playerId = payload['player_id'] as String;
-    final reason = payload['reason'] as String?;
-
-    if (session.value != null) {
-      final updatedPlayers = session.value!.players.map((p) {
-        if (p.id == playerId) {
-          return GamePlayer(
-            id: p.id,
-            sessionId: p.sessionId,
-            userId: p.userId,
-            role: p.role,
-            team: p.team,
-            isAlive: false,
-            diedAtPhase: session.value!.phaseNumber,
-            deathReason: reason,
-            hasUsedHeal: p.hasUsedHeal,
-            hasUsedPoison: p.hasUsedPoison,
-            hasShot: p.hasShot,
-            isProtected: p.isProtected,
-            isMayor: p.isMayor,
-            loverId: p.loverId,
-            currentVoiceChannel: p.currentVoiceChannel,
-            seatPosition: p.seatPosition,
-            user: p.user,
-          );
-        }
-        return p;
-      }).toList();
-
-      session.value = GameSession(
-        id: session.value!.id,
-        roomId: session.value!.roomId,
-        currentPhase: session.value!.currentPhase,
-        phaseNumber: session.value!.phaseNumber,
-        dayNumber: session.value!.dayNumber,
-        phaseEndTime: session.value!.phaseEndTime,
-        winner: session.value!.winner,
-        state: session.value!.state,
-        startedAt: session.value!.startedAt,
-        players: updatedPlayers,
-      );
-
-      // Update my player if it's me
-      if (myPlayer.value?.id == playerId) {
-        myPlayer.value = updatedPlayers.firstWhere((p) => p.id == playerId);
-      }
-
-      events.add(
-        GameEvent(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          sessionId: session.value!.id,
-          phaseNumber: session.value!.phaseNumber,
-          eventType: 'player_killed',
-          eventData: payload,
-          isPublic: true,
-          createdAt: DateTime.now(),
-        ),
-      );
     }
   }
 
@@ -341,10 +283,103 @@ class GameProvider extends GetxController {
     _phaseTimer?.cancel();
   }
 
-  void _handleActionResult(Map<String, dynamic> payload) {
-    if (payload['success'] == false) {
-      errorMessage.value = payload['message'] ?? 'Action failed';
+  void _handlePlayerDeath(Map<String, dynamic> payload) {
+    // Renamed from _handlePlayerKilled to match backend 'player_death'
+    final playerId = payload['player_id'] as String?;
+    if (playerId != null && session.value != null) {
+      final updatedPlayers = session.value!.players.map((p) {
+        if (p.id == playerId) {
+          return GamePlayer(
+            id: p.id,
+            sessionId: p.sessionId,
+            userId: p.userId,
+            role: p.role,
+            team: p.team,
+            isAlive: false,
+            diedAtPhase: payload['phase_number'] as int?,
+            deathReason: payload['death_reason'] as String?,
+            hasUsedHeal: p.hasUsedHeal,
+            hasUsedPoison: p.hasUsedPoison,
+            hasShot: p.hasShot,
+            isProtected: p.isProtected,
+            isMayor: p.isMayor,
+            loverId: p.loverId,
+            currentVoiceChannel: p.currentVoiceChannel,
+            seatPosition: p.seatPosition,
+            user: p.user,
+          );
+        }
+        return p;
+      }).toList();
+
+      session.value = GameSession(
+        id: session.value!.id,
+        roomId: session.value!.roomId,
+        currentPhase: session.value!.currentPhase,
+        phaseNumber: session.value!.phaseNumber,
+        dayNumber: session.value!.dayNumber,
+        phaseEndTime: session.value!.phaseEndTime,
+        winner: session.value!.winner,
+        state: session.value!.state,
+        startedAt: session.value!.startedAt,
+        players: updatedPlayers,
+      );
+
+      if (myPlayer.value?.id == playerId) {
+        myPlayer.value = updatedPlayers.firstWhere((p) => p.id == playerId);
+      }
     }
+  }
+
+  void _handleTimer(Map<String, dynamic> payload) {
+    // Backend sends timer updates for phase countdown synchronization
+    if (payload['phase_ends_at'] != null) {
+      final endsAt = DateTime.parse(payload['phase_ends_at'] as String);
+      if (session.value != null) {
+        session.value = GameSession(
+          id: session.value!.id,
+          roomId: session.value!.roomId,
+          currentPhase: session.value!.currentPhase,
+          phaseNumber: session.value!.phaseNumber,
+          dayNumber: session.value!.dayNumber,
+          phaseEndTime: endsAt,
+          winner: session.value!.winner,
+          state: session.value!.state,
+          startedAt: session.value!.startedAt,
+          players: session.value!.players,
+        );
+        _updatePhaseTimer();
+      }
+    }
+  }
+
+  void _handlePlayerAction(Map<String, dynamic> payload) {
+    // Backend notifies when a player performs an action (for UI feedback)
+    final actionType = payload['action_type'] as String?;
+    final playerName = payload['player_name'] as String?;
+
+    if (actionType != null && playerName != null) {
+      events.add(
+        GameEvent(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          sessionId: session.value?.id ?? '',
+          phaseNumber: session.value?.phaseNumber ?? 0,
+          eventType: 'player_action',
+          eventData: payload,
+          isPublic: payload['is_public'] as bool? ?? false,
+          createdAt: DateTime.now(),
+        ),
+      );
+    }
+  }
+
+  void _handleError(Map<String, dynamic> payload) {
+    errorMessage.value = payload['message'] as String? ?? 'Unknown error';
+    Get.snackbar(
+      'Error',
+      errorMessage.value,
+      duration: const Duration(seconds: 3),
+    );
   }
 
   void _updatePhaseTimer() {

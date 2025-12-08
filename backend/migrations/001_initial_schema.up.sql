@@ -104,6 +104,7 @@ CREATE UNIQUE INDEX idx_room_players_active ON room_players(room_id, user_id) WH
 CREATE TABLE game_sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     room_id UUID NOT NULL REFERENCES rooms(id),
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'abandoned')),
     current_phase VARCHAR(30) DEFAULT 'night_0' CHECK (current_phase IN (
         'night_0', 'cupid_phase', 'werewolf_phase', 'seer_phase', 
         'witch_phase', 'bodyguard_phase', 'day_discussion', 
@@ -112,17 +113,22 @@ CREATE TABLE game_sessions (
     )),
     phase_number INTEGER DEFAULT 0,
     day_number INTEGER DEFAULT 0,
-    phase_end_time TIMESTAMP WITH TIME ZONE,
+    phase_started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    phase_ends_at TIMESTAMP WITH TIME ZONE,
     winner VARCHAR(20) CHECK (winner IN ('werewolves', 'villagers', 'lovers', 'tanner')),
     state JSONB DEFAULT '{}'::jsonb,
     config JSONB DEFAULT '{}'::jsonb,
+    werewolves_alive INTEGER DEFAULT 0,
+    villagers_alive INTEGER DEFAULT 0,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     ended_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE INDEX idx_game_sessions_room ON game_sessions(room_id);
+CREATE INDEX idx_game_sessions_status ON game_sessions(status);
 CREATE INDEX idx_game_sessions_phase ON game_sessions(current_phase);
+CREATE INDEX idx_game_sessions_phase_ends ON game_sessions(phase_ends_at) WHERE phase_ends_at IS NOT NULL;
 CREATE INDEX idx_game_sessions_started ON game_sessions(started_at DESC);
 
 -- ============================================================================
@@ -146,6 +152,7 @@ CREATE TABLE game_players (
     is_protected BOOLEAN DEFAULT false,
     is_mayor BOOLEAN DEFAULT false,
     lover_id UUID REFERENCES game_players(id),
+    role_state JSONB DEFAULT '{}'::jsonb,
     current_voice_channel VARCHAR(50),
     seat_position INTEGER,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
