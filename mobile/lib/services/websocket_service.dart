@@ -67,11 +67,49 @@ class WebSocketService extends getx.GetxService {
 
   void _onMessage(dynamic data) {
     try {
-      final json = jsonDecode(data as String);
-      final message = WSMessage.fromJson(json);
-      _messageController.add(message);
+      final dataString = (data as String).trim();
+
+      // Skip empty or invalid messages
+      if (dataString.isEmpty || !dataString.startsWith('{')) {
+        return;
+      }
+
+      // Handle multiple concatenated JSON objects
+      final messages = <String>[];
+      var buffer = '';
+      var depth = 0;
+
+      for (var i = 0; i < dataString.length; i++) {
+        final char = dataString[i];
+        buffer += char;
+
+        if (char == '{') {
+          depth++;
+        } else if (char == '}') {
+          depth--;
+          if (depth == 0 && buffer.trim().isNotEmpty) {
+            messages.add(buffer.trim());
+            buffer = '';
+          }
+        }
+      }
+
+      // Process each complete JSON message
+      for (final msgStr in messages) {
+        try {
+          final json = jsonDecode(msgStr);
+          final message = WSMessage.fromJson(json);
+          _messageController.add(message);
+        } catch (e) {
+          print('Failed to parse message - Error: $e');
+          print('Raw message: $msgStr');
+        }
+      }
     } catch (e) {
       print('WebSocket message parse error: $e');
+      if (data != null) {
+        print('Raw data: $data');
+      }
     }
   }
 

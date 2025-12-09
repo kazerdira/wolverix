@@ -108,7 +108,7 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 		JOIN rooms r ON rp.room_id = r.id
 		WHERE rp.user_id = $1 
 		  AND rp.left_at IS NULL 
-		  AND r.status IN ('waiting', 'in_progress')
+		  AND r.status IN ('waiting', 'starting')
 	`, userID).Scan(&existingRoomCount)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -118,9 +118,57 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 	}
 
 	if existingRoomCount > 0 {
-		log.Printf("❌ CreateRoom - User %v already in an active room", userID)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before creating a new one"})
-		return
+		log.Printf("⚠️  CreateRoom - User %v is in %d active rooms, attempting cleanup", userID, existingRoomCount)
+
+		// Auto-leave user from any stale rooms (closed, abandoned, inactive, or old games)
+		result, err := h.db.PG.Exec(ctx, `
+			UPDATE room_players 
+			SET left_at = NOW() 
+			WHERE user_id = $1 
+			  AND left_at IS NULL 
+			  AND room_id IN (
+				SELECT id FROM rooms 
+				WHERE status NOT IN ('waiting', 'in_progress')
+				   OR created_at < NOW() - INTERVAL '2 hours'
+				   OR last_activity_at < NOW() - INTERVAL '20 minutes'
+			)
+		`, userID)
+
+		if err == nil {
+			rowsAffected := result.RowsAffected()
+			log.Printf("✓ CreateRoom - Cleaned up %d stale room memberships for user %v", rowsAffected, userID)
+		}
+
+		// Re-check after cleanup
+		err = h.db.PG.QueryRow(ctx, `
+			SELECT COUNT(*) FROM room_players rp
+			JOIN rooms r ON rp.room_id = r.id
+			WHERE rp.user_id = $1 
+			  AND rp.left_at IS NULL 
+			  AND r.status IN ('waiting', 'starting')
+		`, userID).Scan(&existingRoomCount)
+
+		if existingRoomCount > 0 {
+			// Log which room is blocking them
+			var blockingRoomID uuid.UUID
+			var blockingRoomName string
+			var blockingRoomStatus string
+			h.db.PG.QueryRow(ctx, `
+				SELECT r.id, r.name, r.status
+				FROM room_players rp
+				JOIN rooms r ON rp.room_id = r.id
+				WHERE rp.user_id = $1 
+				  AND rp.left_at IS NULL 
+				  AND r.status IN ('waiting', 'starting')
+				LIMIT 1
+			`, userID).Scan(&blockingRoomID, &blockingRoomName, &blockingRoomStatus)
+
+			log.Printf("❌ CreateRoom - User %v still in active room: %s (%s) status=%s", userID, blockingRoomName, blockingRoomID, blockingRoomStatus)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before creating a new one"})
+			return
+		}
+
+		log.Printf("✓ CreateRoom - Cleanup successful, user %v can now create room", userID)
 	}
 
 	// Generate unique room code
@@ -359,7 +407,7 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		JOIN rooms r ON rp.room_id = r.id
 		WHERE rp.user_id = $1 
 		  AND rp.left_at IS NULL 
-		  AND r.status IN ('waiting', 'in_progress')
+		  AND r.status IN ('waiting', 'starting')
 	`, userID).Scan(&existingRoomCount)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -368,8 +416,57 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 	}
 
 	if existingRoomCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before joining another"})
-		return
+		log.Printf("⚠️  JoinRoom - User %v is in %d active rooms, attempting cleanup", userID, existingRoomCount)
+
+		// Auto-leave user from any stale rooms (closed, abandoned, inactive, or old games)
+		result, err := h.db.PG.Exec(ctx, `
+			UPDATE room_players 
+			SET left_at = NOW() 
+			WHERE user_id = $1 
+			  AND left_at IS NULL 
+			  AND room_id IN (
+				SELECT id FROM rooms 
+				WHERE status NOT IN ('waiting', 'in_progress')
+				   OR created_at < NOW() - INTERVAL '2 hours'
+				   OR last_activity_at < NOW() - INTERVAL '20 minutes'
+			)
+		`, userID)
+
+		if err == nil {
+			rowsAffected := result.RowsAffected()
+			log.Printf("✓ JoinRoom - Cleaned up %d stale room memberships for user %v", rowsAffected, userID)
+		}
+
+		// Re-check after cleanup
+		err = h.db.PG.QueryRow(ctx, `
+			SELECT COUNT(*) FROM room_players rp
+			JOIN rooms r ON rp.room_id = r.id
+			WHERE rp.user_id = $1 
+			  AND rp.left_at IS NULL 
+			  AND r.status IN ('waiting', 'starting')
+		`, userID).Scan(&existingRoomCount)
+
+		if existingRoomCount > 0 {
+			// Log which room is blocking them
+			var blockingRoomID uuid.UUID
+			var blockingRoomName string
+			var blockingRoomStatus string
+			h.db.PG.QueryRow(ctx, `
+				SELECT r.id, r.name, r.status
+				FROM room_players rp
+				JOIN rooms r ON rp.room_id = r.id
+				WHERE rp.user_id = $1 
+				  AND rp.left_at IS NULL 
+				  AND r.status IN ('waiting', 'starting')
+				LIMIT 1
+			`, userID).Scan(&blockingRoomID, &blockingRoomName, &blockingRoomStatus)
+
+			log.Printf("❌ JoinRoom - User %v still in active room: %s (%s) status=%s", userID, blockingRoomName, blockingRoomID, blockingRoomStatus)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "you are already in an active room. Please leave it before joining another"})
+			return
+		}
+
+		log.Printf("✓ JoinRoom - Cleanup successful, user %v can now join", userID)
 	}
 
 	// Add player to room
@@ -437,6 +534,77 @@ func (h *Handler) LeaveRoom(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "left room"})
+}
+
+// ForceLeaveAllRooms removes the user from all active rooms (emergency cleanup)
+func (h *Handler) ForceLeaveAllRooms(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	ctx := context.Background()
+
+	log.Printf("Force leaving all rooms for user %v", userID)
+
+	// Get all active rooms user is in
+	rows, err := h.db.PG.Query(ctx, `
+		SELECT DISTINCT rp.room_id, r.name
+		FROM room_players rp
+		JOIN rooms r ON r.id = rp.room_id
+		WHERE rp.user_id = $1 AND rp.left_at IS NULL
+	`, userID)
+
+	if err != nil {
+		log.Printf("Error querying user rooms: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query rooms"})
+		return
+	}
+	defer rows.Close()
+
+	var leftRooms []string
+	var roomIDs []uuid.UUID
+
+	for rows.Next() {
+		var roomID uuid.UUID
+		var roomName string
+		if err := rows.Scan(&roomID, &roomName); err != nil {
+			continue
+		}
+		roomIDs = append(roomIDs, roomID)
+		leftRooms = append(leftRooms, roomName)
+	}
+
+	// Mark player as left in all rooms
+	result, err := h.db.PG.Exec(ctx, `
+		UPDATE room_players 
+		SET left_at = $1 
+		WHERE user_id = $2 AND left_at IS NULL
+	`, time.Now(), userID)
+
+	if err != nil {
+		log.Printf("Error leaving rooms: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to leave rooms"})
+		return
+	}
+
+	rowsAffected := result.RowsAffected()
+	log.Printf("User %v left %d room memberships", userID, rowsAffected)
+
+	// Update player counts for all affected rooms
+	for _, roomID := range roomIDs {
+		h.db.PG.Exec(ctx, `
+			UPDATE rooms SET current_players = current_players - 1 WHERE id = $1 AND current_players > 0
+		`, roomID)
+
+		// Broadcast to each room
+		h.wsHub.BroadcastToRoom(roomID, models.WSTypeRoomUpdate, gin.H{
+			"action":  "player_left",
+			"user_id": userID,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "left all rooms",
+		"room_count": len(roomIDs),
+		"rooms":      leftRooms,
+	})
 }
 
 // SetReady toggles player ready status

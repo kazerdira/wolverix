@@ -60,37 +60,39 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Join Room')),
-      body: Padding(
+      resizeToAvoidBottomInset: true,
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            const SizedBox(height: 20),
             // Icon
             Container(
-              width: 100,
-              height: 100,
+              width: 80,
+              height: 80,
               decoration: BoxDecoration(
                 color: WolverixTheme.primaryColor.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(16),
               ),
               child: const Icon(
                 Icons.login,
-                size: 50,
+                size: 40,
                 color: WolverixTheme.primaryColor,
               ),
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 20),
             // Title
             const Text(
               'Enter Room Code',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Text(
               'Ask the host for the 6-character code',
-              style: TextStyle(color: WolverixTheme.textSecondary),
+              style:
+                  TextStyle(color: WolverixTheme.textSecondary, fontSize: 14),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 24),
             // Code input
             TextField(
               controller: _codeController,
@@ -99,21 +101,23 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
               textCapitalization: TextCapitalization.characters,
               maxLength: 6,
               style: const TextStyle(
-                fontSize: 32,
+                fontSize: 28,
                 fontWeight: FontWeight.bold,
-                letterSpacing: 10,
+                letterSpacing: 8,
               ),
               decoration: InputDecoration(
                 hintText: '------',
                 hintStyle: TextStyle(
                   color: WolverixTheme.textHint.withOpacity(0.3),
-                  letterSpacing: 10,
+                  letterSpacing: 8,
                 ),
                 counterText: '',
                 filled: true,
                 fillColor: WolverixTheme.cardColor,
+                contentPadding:
+                    const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
                 ),
               ),
@@ -122,7 +126,7 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
               ],
               onSubmitted: (_) => _joinRoom(),
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 20),
             // Join button
             SizedBox(
               width: double.infinity,
@@ -143,6 +147,7 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
                 );
               }),
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),

@@ -65,14 +65,22 @@ func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameS
 	// Get room and players
 	var room models.Room
 	var roomConfig json.RawMessage
+	log.Printf("🎮 StartGame: Looking for room %s with status IN ('waiting', 'starting')", roomID)
+
 	err = tx.QueryRow(ctx, `
-		SELECT id, room_code, name, host_user_id, max_players, current_players, config
-		FROM rooms WHERE id = $1 AND status = 'waiting'
+		SELECT id, room_code, name, host_user_id, max_players, current_players, config, status
+		FROM rooms WHERE id = $1 AND status IN ('waiting', 'starting')
 	`, roomID).Scan(&room.ID, &room.RoomCode, &room.Name, &room.HostUserID,
-		&room.MaxPlayers, &room.CurrentPlayers, &roomConfig)
+		&room.MaxPlayers, &room.CurrentPlayers, &roomConfig, &room.Status)
 	if err != nil {
-		return nil, fmt.Errorf("room not found or not in waiting state: %w", err)
+		// Log what the actual room status is
+		var actualStatus string
+		e.db.QueryRow(ctx, "SELECT status FROM rooms WHERE id = $1", roomID).Scan(&actualStatus)
+		log.Printf("❌ StartGame failed: Room %s has status '%s', error: %v", roomID, actualStatus, err)
+		return nil, fmt.Errorf("room not found or not ready to start (status: %s): %w", actualStatus, err)
 	}
+
+	log.Printf("✅ StartGame: Found room %s with status '%s'", roomID, room.Status)
 
 	if err := json.Unmarshal(roomConfig, &room.Config); err != nil {
 		return nil, fmt.Errorf("failed to parse room config: %w", err)

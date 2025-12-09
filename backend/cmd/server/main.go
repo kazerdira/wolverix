@@ -126,6 +126,7 @@ func main() {
 		protected.GET("/rooms/:roomId", handler.GetRoom)
 		protected.POST("/rooms/:roomId/start", handler.StartGame)
 		protected.POST("/rooms/:roomId/leave", handler.LeaveRoom)
+		protected.POST("/rooms/force-leave-all", handler.ForceLeaveAllRooms)
 		protected.POST("/rooms/:roomId/ready", handler.SetReady)
 		protected.POST("/rooms/:roomId/kick", handler.KickPlayer)
 		protected.POST("/rooms/:roomId/extend-timeout", handler.ExtendRoomTimeout)

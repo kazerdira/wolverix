@@ -171,6 +171,11 @@ class ApiService extends getx.GetxService {
     await _dio.post('/rooms/$roomId/leave');
   }
 
+  Future<Map<String, dynamic>> forceLeaveAllRooms() async {
+    final response = await _dio.post('/rooms/force-leave-all');
+    return response.data;
+  }
+
   Future<void> setReady(String roomId, bool ready) async {
     await _dio.post('/rooms/$roomId/ready', data: {'ready': ready});
   }

@@ -5,6 +5,8 @@ import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../services/storage_service.dart';
+import '../utils/error_handler.dart';
+import '../screens/game/role_reveal_screen.dart';
 
 class GameProvider extends GetxController {
   final ApiService _api = Get.find<ApiService>();
@@ -72,6 +74,8 @@ class GameProvider extends GetxController {
       isLoading.value = true;
 
       final gameSession = await _api.getGameState(sessionId);
+      print(
+          '📊 Game session loaded: phaseEndTime = ${gameSession.phaseEndTime}');
       session.value = gameSession;
 
       // Find my player
@@ -87,8 +91,12 @@ class GameProvider extends GetxController {
       // Start phase timer
       _updatePhaseTimer();
     } catch (e) {
-      errorMessage.value = 'Failed to load game';
-      print('Error loading game: $e');
+      final error = ErrorHandler().parseError(e);
+      errorMessage.value = error.message;
+      ErrorHandler().showError(
+        error,
+        onRetry: () => loadGame(sessionId),
+      );
     } finally {
       isLoading.value = false;
     }
@@ -116,7 +124,16 @@ class GameProvider extends GetxController {
         return false;
       }
     } catch (e) {
-      errorMessage.value = 'Failed to perform action';
+      final error = ErrorHandler().parseError(e);
+      errorMessage.value = error.message;
+      ErrorHandler().showError(
+        error,
+        onRetry: () => performAction(
+          actionType: actionType,
+          targetPlayerId: targetPlayerId,
+          data: data,
+        ),
+      );
       return false;
     }
   }
@@ -234,6 +251,88 @@ class GameProvider extends GetxController {
         seatPosition: myPlayer.value!.seatPosition,
         user: myPlayer.value!.user,
       );
+
+      // Show dramatic role reveal screen
+      _showRoleReveal(role, team, payload);
+    }
+  }
+
+  void _showRoleReveal(
+      GameRole role, GameTeam team, Map<String, dynamic> payload) {
+    // Get role info
+    final roleInfo = _getRoleInfo(role);
+
+    // Get teammates if werewolf
+    List<String>? teammates;
+    if (role == GameRole.werewolf && session.value != null) {
+      teammates = session.value!.players
+          .where((p) =>
+              p.role == GameRole.werewolf && p.userId != _storage.getUserId())
+          .map((p) => p.user?.username ?? 'Unknown')
+          .toList();
+    }
+
+    // Navigate to role reveal screen
+    Get.to(() => RoleRevealScreen(
+          roleName: roleInfo['name'] as String,
+          roleDescription: roleInfo['description'] as String,
+          team: team == GameTeam.werewolves ? 'werewolves' : 'villagers',
+          teammates: teammates,
+          onComplete: () {
+            Get.back();
+          },
+        ));
+  }
+
+  Map<String, String> _getRoleInfo(GameRole role) {
+    switch (role) {
+      case GameRole.werewolf:
+        return {
+          'name': 'Werewolf',
+          'description':
+              'Hunt villagers at night. Your goal is to eliminate all villagers without being caught.',
+        };
+      case GameRole.seer:
+        return {
+          'name': 'Seer',
+          'description':
+              'Each night, you can inspect one player to learn their true identity. Use this power wisely to guide the village.',
+        };
+      case GameRole.witch:
+        return {
+          'name': 'Witch',
+          'description':
+              'You have two potions: one to save a life and one to take it. Use them strategically - you can only use each once.',
+        };
+      case GameRole.hunter:
+        return {
+          'name': 'Hunter',
+          'description':
+              'If you die, you can take someone down with you. Choose your final shot carefully.',
+        };
+      case GameRole.cupid:
+        return {
+          'name': 'Cupid',
+          'description':
+              'On the first night, you create a bond between two players. If one dies, the other dies of heartbreak.',
+        };
+      case GameRole.bodyguard:
+        return {
+          'name': 'Bodyguard',
+          'description':
+              'Each night, you can protect one player from werewolf attacks. You cannot protect the same person twice in a row.',
+        };
+      case GameRole.villager:
+        return {
+          'name': 'Villager',
+          'description':
+              'You have no special powers, but your vote and voice matter. Use logic and deduction to find the werewolves.',
+        };
+      default:
+        return {
+          'name': 'Unknown',
+          'description': 'Your role is unknown.',
+        };
     }
   }
 
@@ -385,18 +484,37 @@ class GameProvider extends GetxController {
   void _updatePhaseTimer() {
     _phaseTimer?.cancel();
 
-    if (session.value?.phaseEndTime != null) {
-      _phaseTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        final endTime = session.value!.phaseEndTime!;
-        final remaining = endTime.difference(DateTime.now());
+    print(
+        '⏰ Updating phase timer: phaseEndTime = ${session.value?.phaseEndTime}');
 
-        if (remaining.isNegative) {
-          phaseTimeRemaining.value = Duration.zero;
-          _phaseTimer?.cancel();
-        } else {
-          phaseTimeRemaining.value = remaining;
-        }
-      });
+    if (session.value?.phaseEndTime != null) {
+      // Update immediately
+      final endTime = session.value!.phaseEndTime!;
+      final remaining = endTime.difference(DateTime.now());
+
+      if (remaining.isNegative) {
+        phaseTimeRemaining.value = Duration.zero;
+        print('⚠️ Phase already ended! Time remaining: 0');
+      } else {
+        phaseTimeRemaining.value = remaining;
+        print(
+            '✅ Timer started: ${remaining.inMinutes}:${remaining.inSeconds % 60}');
+
+        // Then update every second
+        _phaseTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+          final newRemaining = endTime.difference(DateTime.now());
+
+          if (newRemaining.isNegative) {
+            phaseTimeRemaining.value = Duration.zero;
+            _phaseTimer?.cancel();
+          } else {
+            phaseTimeRemaining.value = newRemaining;
+          }
+        });
+      }
+    } else {
+      print('❌ Phase end time is null, timer will not start');
+      phaseTimeRemaining.value = Duration.zero;
     }
   }
 

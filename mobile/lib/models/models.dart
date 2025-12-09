@@ -302,12 +302,12 @@ class GameSession {
       currentPhase: GamePhase.fromString(json['current_phase']),
       phaseNumber: json['phase_number'] ?? 0,
       dayNumber: json['day_number'] ?? 0,
-      phaseEndTime: json['phase_end_time'] != null
-          ? DateTime.parse(json['phase_end_time'])
+      phaseEndTime: json['phase_ends_at'] != null
+          ? DateTime.parse(json['phase_ends_at'])
           : null,
-      winner: json['winner'],
+      winner: json['winning_team'],
       state: GameState.fromJson(json['state'] ?? {}),
-      startedAt: DateTime.parse(json['started_at']),
+      startedAt: DateTime.parse(json['created_at']),
       players: (json['players'] as List<dynamic>?)
               ?.map((p) => GamePlayer.fromJson(p))
               .toList() ??
@@ -400,33 +400,67 @@ enum GamePhase {
 }
 
 class GameState {
-  final String? targetedPlayer;
-  final String? healedPlayer;
-  final String? poisonedPlayer;
+  final String? lastKilledPlayer;
+  final String? lastLynchedPlayer;
+  final Map<String, int> werewolfVotes;
+  final Map<String, int> lynchVotes;
+  final String? currentVoteTarget;
+  final Map<String, bool> actionsCompleted;
+  final Map<String, int> actionsRemaining;
   final String? protectedPlayer;
-  final String? nominatedPlayer;
-  final Map<String, String> lynchVotes;
-  final int tieVoteCount;
+  final String? poisonedPlayer;
+  final String? healedPlayer;
+  final Map<String, String> revealedRoles;
+  final List<String> nightKills;
+  final bool pendingHunterShot;
+  final String? hunterPlayerId;
 
   GameState({
-    this.targetedPlayer,
-    this.healedPlayer,
-    this.poisonedPlayer,
-    this.protectedPlayer,
-    this.nominatedPlayer,
+    this.lastKilledPlayer,
+    this.lastLynchedPlayer,
+    this.werewolfVotes = const {},
     this.lynchVotes = const {},
-    this.tieVoteCount = 0,
+    this.currentVoteTarget,
+    this.actionsCompleted = const {},
+    this.actionsRemaining = const {},
+    this.protectedPlayer,
+    this.poisonedPlayer,
+    this.healedPlayer,
+    this.revealedRoles = const {},
+    this.nightKills = const [],
+    this.pendingHunterShot = false,
+    this.hunterPlayerId,
   });
 
   factory GameState.fromJson(Map<String, dynamic> json) {
     return GameState(
-      targetedPlayer: json['targeted_player'],
-      healedPlayer: json['healed_player'],
-      poisonedPlayer: json['poisoned_player'],
+      lastKilledPlayer: json['last_killed_player'],
+      lastLynchedPlayer: json['last_lynched_player'],
+      werewolfVotes: (json['werewolf_votes'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as int)) ??
+          {},
+      lynchVotes: (json['lynch_votes'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as int)) ??
+          {},
+      currentVoteTarget: json['current_vote_target'],
+      actionsCompleted: (json['actions_completed'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as bool)) ??
+          {},
+      actionsRemaining: (json['actions_remaining'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as int)) ??
+          {},
       protectedPlayer: json['protected_player'],
-      nominatedPlayer: json['nominated_player'],
-      lynchVotes: Map<String, String>.from(json['lynch_votes'] ?? {}),
-      tieVoteCount: json['tie_vote_count'] ?? 0,
+      poisonedPlayer: json['poisoned_player'],
+      healedPlayer: json['healed_player'],
+      revealedRoles: (json['revealed_roles'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as String)) ??
+          {},
+      nightKills: (json['night_kills'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [],
+      pendingHunterShot: json['pending_hunter_shot'] ?? false,
+      hunterPlayerId: json['hunter_player_id'],
     );
   }
 }
@@ -471,6 +505,8 @@ class GamePlayer {
   });
 
   factory GamePlayer.fromJson(Map<String, dynamic> json) {
+    final roleState = json['role_state'] as Map<String, dynamic>? ?? {};
+
     return GamePlayer(
       id: json['id'],
       sessionId: json['session_id'] ?? '',
@@ -480,11 +516,11 @@ class GamePlayer {
       isAlive: json['is_alive'] ?? true,
       diedAtPhase: json['died_at_phase'],
       deathReason: json['death_reason'],
-      hasUsedHeal: json['has_used_heal'] ?? false,
-      hasUsedPoison: json['has_used_poison'] ?? false,
-      hasShot: json['has_shot'] ?? false,
-      isProtected: json['is_protected'] ?? false,
-      isMayor: json['is_mayor'] ?? false,
+      hasUsedHeal: roleState['heal_used'] ?? false,
+      hasUsedPoison: roleState['poison_used'] ?? false,
+      hasShot: roleState['has_shot'] ?? false,
+      isProtected: false, // This is from game state, not player state
+      isMayor: roleState['is_revealed'] ?? false,
       loverId: json['lover_id'],
       currentVoiceChannel: json['current_voice_channel'],
       seatPosition: json['seat_position'] ?? 0,

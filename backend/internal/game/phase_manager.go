@@ -332,8 +332,13 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		aliveRoles = append(aliveRoles, role)
 	}
 
-	// Convert to JSON array string
-	rolesJSON, err := json.Marshal(aliveRoles)
+	// Convert to map[string]int format (role -> 1 for each action needed)
+	actionsMap := make(map[string]int)
+	for _, role := range aliveRoles {
+		actionsMap[role] = 1
+	}
+
+	actionsJSON, err := json.Marshal(actionsMap)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +351,7 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		    phase_started_at = NOW(), phase_ends_at = $2,
 		    state = jsonb_set(state, '{actions_remaining}', $3::jsonb)
 		WHERE id = $4
-	`, models.GamePhaseNight, phaseEndsAt, rolesJSON, sessionID)
+	`, models.GamePhaseNight, phaseEndsAt, actionsJSON, sessionID)
 	if err != nil {
 		return nil, err
 	}

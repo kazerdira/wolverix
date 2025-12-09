@@ -217,12 +217,12 @@ func (lm *LifecycleManager) closeExpiredRooms(ctx context.Context) {
 	}
 }
 
-// closeRoom marks a room as abandoned and notifies players
+// closeRoom marks a room as finished and notifies players
 func (lm *LifecycleManager) closeRoom(ctx context.Context, roomID uuid.UUID, reason string) bool {
-	// Update room status
+	// Update room status (use 'finished' instead of 'abandoned' due to DB constraint)
 	_, err := lm.db.PG.Exec(ctx, `
 		UPDATE rooms 
-		SET status = 'abandoned', finished_at = NOW(), updated_at = NOW()
+		SET status = 'finished', updated_at = NOW()
 		WHERE id = $1
 	`, roomID)
 
@@ -245,13 +245,12 @@ func (lm *LifecycleManager) closeRoom(ctx context.Context, roomID uuid.UUID, rea
 // deleteOldRooms removes old abandoned and completed rooms
 func (lm *LifecycleManager) deleteOldRooms(ctx context.Context) {
 	abandonedThreshold := time.Now().Add(-AbandonedRetention)
-	completedThreshold := time.Now().Add(-CompletedRetention)
 
-	// Delete old abandoned rooms
+	// Delete old finished/abandoned rooms (use updated_at since finished_at doesn't exist)
 	abandonedResult, err := lm.db.PG.Exec(ctx, `
 		DELETE FROM rooms
-		WHERE status = 'abandoned'
-		  AND finished_at < $1
+		WHERE status IN ('finished', 'abandoned')
+		  AND updated_at < $1
 	`, abandonedThreshold)
 
 	if err != nil {
@@ -260,11 +259,12 @@ func (lm *LifecycleManager) deleteOldRooms(ctx context.Context) {
 		log.Printf("🗑️  Deleted %d old abandoned rooms (>24h)", abandonedResult.RowsAffected())
 	}
 
-	// Delete old completed rooms
+	// Delete old completed rooms (use updated_at since finished_at doesn't exist)
+	completedThreshold := time.Now().Add(-CompletedRetention)
 	completedResult, err := lm.db.PG.Exec(ctx, `
 		DELETE FROM rooms
 		WHERE status IN ('finished', 'completed')
-		  AND finished_at < $1
+		  AND updated_at < $1
 	`, completedThreshold)
 
 	if err != nil {

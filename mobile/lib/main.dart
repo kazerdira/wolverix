@@ -19,11 +19,15 @@ import 'screens/room/room_lobby_screen.dart';
 import 'screens/room/create_room_screen.dart';
 import 'screens/room/join_room_screen.dart';
 import 'screens/game/game_screen.dart';
-import 'utils/theme.dart';
+import 'utils/error_handler.dart';
 import 'utils/translations.dart';
+import 'theme/wolverix_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize error handler
+  ErrorHandler().init();
 
   // Initialize storage
   await GetStorage.init();
@@ -56,7 +60,6 @@ class WolverixApp extends StatelessWidget {
       title: 'Wolverix',
       debugShowCheckedModeBanner: false,
       theme: WolverixTheme.darkTheme,
-      darkTheme: WolverixTheme.darkTheme,
       themeMode: ThemeMode.dark,
       translations: WolverixTranslations(),
       locale: Get.deviceLocale,

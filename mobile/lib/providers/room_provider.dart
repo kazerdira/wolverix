@@ -5,6 +5,7 @@ import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../services/storage_service.dart';
+import '../utils/error_handler.dart';
 
 class RoomProvider extends GetxController {
   final ApiService _api = Get.find<ApiService>();
@@ -39,8 +40,22 @@ class RoomProvider extends GetxController {
             _handleRoomClosed(message.payload);
           } else if (action == 'timeout_extended') {
             _handleTimeoutExtended(message.payload);
+          } else if (action == 'player_joined') {
+            _handlePlayerJoined(message.payload);
+          } else if (action == 'player_left') {
+            _handlePlayerLeft(message.payload);
+          } else if (action == 'player_ready') {
+            _handlePlayerReady(message.payload);
+          } else if (action == 'player_kicked') {
+            _handlePlayerKicked(message.payload);
           } else {
             _handleRoomUpdate(message.payload);
+          }
+          break;
+        case 'game_update':
+          final action = message.payload['action'];
+          if (action == 'game_started') {
+            _handleGameStarted(message.payload);
           }
           break;
         case 'player_joined':
@@ -97,12 +112,17 @@ class RoomProvider extends GetxController {
 
       return room;
     } catch (e) {
-      if (e.toString().contains('already in an active room')) {
-        errorMessage.value =
-            'You are already in an active room. Please leave it first.';
-      } else {
-        errorMessage.value = 'Failed to create room';
-      }
+      final error = ErrorHandler().parseError(e);
+      errorMessage.value = error.message;
+      ErrorHandler().showError(
+        error,
+        onRetry: () => createRoom(
+          name: name,
+          isPrivate: isPrivate,
+          maxPlayers: maxPlayers,
+          config: config,
+        ),
+      );
       return null;
     } finally {
       isLoading.value = false;
@@ -125,16 +145,12 @@ class RoomProvider extends GetxController {
 
       return true;
     } catch (e) {
-      if (e.toString().contains('404')) {
-        errorMessage.value = 'Room not found';
-      } else if (e.toString().contains('full')) {
-        errorMessage.value = 'Room is full';
-      } else if (e.toString().contains('already in an active room')) {
-        errorMessage.value =
-            'You are already in an active room. Please leave it first.';
-      } else {
-        errorMessage.value = 'Failed to join room';
-      }
+      final error = ErrorHandler().parseError(e);
+      errorMessage.value = error.message;
+      ErrorHandler().showError(
+        error,
+        onRetry: () => joinRoom(roomCode),
+      );
       return false;
     } finally {
       isLoading.value = false;
@@ -150,6 +166,18 @@ class RoomProvider extends GetxController {
       currentRoom.value = null;
     } catch (e) {
       print('Error leaving room: $e');
+    }
+  }
+
+  Future<Map<String, dynamic>> forceLeaveAllRooms() async {
+    try {
+      final result = await _api.forceLeaveAllRooms();
+      await _ws.disconnect();
+      currentRoom.value = null;
+      return result;
+    } catch (e) {
+      print('Error force leaving all rooms: $e');
+      rethrow;
     }
   }
 
@@ -178,10 +206,19 @@ class RoomProvider extends GetxController {
 
     try {
       isLoading.value = true;
+      print('🎮 Starting game for room: ${currentRoom.value!.id}');
       final session = await _api.startGame(currentRoom.value!.id);
+      print('✅ Game started successfully! Session ID: ${session.id}');
       return session;
     } catch (e) {
-      errorMessage.value = _extractStartGameError(e);
+      print('❌ Error starting game: $e');
+      final error = ErrorHandler().parseError(e);
+      errorMessage.value = error.message;
+      print('📝 Error message: ${error.message}');
+      ErrorHandler().showError(
+        error,
+        onRetry: () => startGame(),
+      );
       return null;
     } finally {
       isLoading.value = false;

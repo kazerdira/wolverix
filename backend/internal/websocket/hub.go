@@ -108,6 +108,7 @@ func (h *Hub) broadcastToRoom(message *BroadcastMessage) {
 
 	clients, ok := h.rooms[message.RoomID]
 	if !ok {
+		log.Printf("Room %s has no connected clients", message.RoomID)
 		return
 	}
 
@@ -125,6 +126,7 @@ func (h *Hub) broadcastToRoom(message *BroadcastMessage) {
 		}
 	}
 
+	sentCount := 0
 	for client := range clients {
 		// Skip excluded user if specified
 		if message.Exclude != nil && client.UserID == *message.Exclude {
@@ -138,6 +140,7 @@ func (h *Hub) broadcastToRoom(message *BroadcastMessage) {
 
 		select {
 		case client.send <- messageJSON:
+			sentCount++
 		default:
 			// Client send buffer is full, disconnect
 			close(client.send)
@@ -145,6 +148,8 @@ func (h *Hub) broadcastToRoom(message *BroadcastMessage) {
 			delete(clients, client)
 		}
 	}
+
+	log.Printf("Sent %s message to %d clients in room %s", message.Message.Type, sentCount, message.RoomID)
 }
 
 // BroadcastToRoom sends a message to all clients in a room
@@ -154,6 +159,8 @@ func (h *Hub) BroadcastToRoom(roomID uuid.UUID, msgType models.WSMessageType, pa
 		Payload:   payload,
 		Timestamp: time.Now(),
 	}
+
+	log.Printf("Broadcasting to room %s: type=%s payload=%+v", roomID, msgType, payload)
 
 	h.broadcast <- &BroadcastMessage{
 		RoomID:  roomID,

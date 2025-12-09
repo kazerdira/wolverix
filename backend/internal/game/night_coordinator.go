@@ -110,14 +110,14 @@ func (nc *NightCoordinator) GetRequiredActions(ctx context.Context, sessionID uu
 
 // MarkActionComplete marks a role's action as complete
 func (nc *NightCoordinator) MarkActionComplete(ctx context.Context, sessionID uuid.UUID, role models.Role) error {
-	// Remove role from actions_remaining array
+	// Remove role from actions_remaining map by deleting the key
 	_, err := nc.db.Exec(ctx, `
 		UPDATE game_sessions
-		SET state = state - 'actions_remaining' || 
-		            jsonb_build_object('actions_remaining', 
-		                (SELECT jsonb_agg(elem) 
-		                 FROM jsonb_array_elements_text(state->'actions_remaining') elem
-		                 WHERE elem::text != $2))
+		SET state = jsonb_set(
+			state, 
+			'{actions_remaining}',
+			(state->'actions_remaining') - $2
+		)
 		WHERE id = $1
 	`, sessionID, string(role))
 	return err

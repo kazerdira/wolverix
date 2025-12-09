@@ -1,3 +1,19 @@
+This is a complete redesign of your HomeScreen.
+
+The Design Philosophy: We are moving from a "Utility App" look to an "RPG Character Menu" look.
+
+Immersive Background: A "Night Forest" particle effect similar to the Lobby.
+
+Player Identity: Your profile is now a "Hero Card" at the top, showing your stats (Win rate, games played) immediately.
+
+Portal Actions: "Create Room" and "Join Room" are no longer simple buttons; they are large, illustrated cards that look like portals.
+
+Village List: The rooms are displayed as "Village Signposts" with glassmorphism effects.
+
+Here is the code. Copy this into lib/screens/home/home_screen.dart.
+
+Dart
+
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -7,7 +23,7 @@ import 'package:get/get.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../models/models.dart';
-import '../../services/api_service.dart';
+import '../../utils/theme.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -51,23 +67,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text('WOLVERIX',
-            style: TextStyle(
-                letterSpacing: 4,
-                fontWeight: FontWeight.w900,
-                fontSize: 24,
-                color: Colors.white70)),
+        title: const Text(
+          'WOLVERIX', 
+          style: TextStyle(
+            letterSpacing: 4, 
+            fontWeight: FontWeight.w900,
+            fontSize: 24,
+            color: Colors.white70
+          )
+        ),
         actions: [
           _GlassIconButton(
             icon: Icons.refresh,
             onTap: () => Get.find<RoomProvider>().fetchRooms(),
-          ),
-          const SizedBox(width: 8),
-          _GlassIconButton(
-            icon: Icons.exit_to_app,
-            color: Colors.orange,
-            onTap: () => _showForceLeaveAllDialog(),
-            tooltip: 'Leave all rooms',
           ),
           const SizedBox(width: 8),
           _GlassIconButton(
@@ -96,7 +108,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 physics: const BouncingScrollPhysics(),
                 slivers: [
                   const SliverToBoxAdapter(child: SizedBox(height: 20)),
-
+                  
                   // 3. User Hero Card
                   const SliverToBoxAdapter(
                     child: Padding(
@@ -123,8 +135,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       padding: const EdgeInsets.symmetric(horizontal: 24),
                       child: Row(
                         children: [
-                          const Icon(Icons.night_shelter,
-                              color: Color(0xFF4CAF50), size: 20),
+                          const Icon(Icons.night_shelter, color: Color(0xFF4CAF50), size: 20),
                           const SizedBox(width: 8),
                           Text(
                             "ACTIVE VILLAGES",
@@ -144,7 +155,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
                   // 6. Room List
                   _RoomListSliver(),
-
+                  
                   const SliverToBoxAdapter(child: SizedBox(height: 100)),
                 ],
               ),
@@ -159,10 +170,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     Get.dialog(
       AlertDialog(
         backgroundColor: const Color(0xFF16213E),
-        title: const Text('Retreat from the Village?',
-            style: TextStyle(color: Colors.white)),
-        content: const Text('Are you sure you want to logout?',
-            style: TextStyle(color: Colors.white70)),
+        title: const Text('Retreat from the Village?', style: TextStyle(color: Colors.white)),
+        content: const Text('Are you sure you want to logout?', style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(onPressed: () => Get.back(), child: const Text('Stay')),
           ElevatedButton(
@@ -172,63 +181,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
             child: const Text('Logout'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showForceLeaveAllDialog() {
-    Get.dialog(
-      AlertDialog(
-        backgroundColor: const Color(0xFF16213E),
-        title: Row(
-          children: [
-            const Icon(Icons.warning_amber, color: Colors.orange),
-            const SizedBox(width: 8),
-            const Text('Emergency Exit', style: TextStyle(color: Colors.white)),
-          ],
-        ),
-        content: const Text(
-          'This will immediately remove you from ALL active rooms.\n\nUse this if you\'re stuck and can\'t create or join new rooms.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Get.back(),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Get.back();
-              try {
-                final roomProvider = Get.find<RoomProvider>();
-                final result = await roomProvider.forceLeaveAllRooms();
-
-                Get.snackbar(
-                  'Success',
-                  'Left ${result['room_count']} room(s)',
-                  backgroundColor: Colors.green.withOpacity(0.8),
-                  colorText: Colors.white,
-                  snackPosition: SnackPosition.BOTTOM,
-                  margin: const EdgeInsets.all(16),
-                );
-
-                // Refresh room list
-                roomProvider.fetchRooms();
-              } catch (e) {
-                Get.snackbar(
-                  'Error',
-                  'Failed to leave rooms: $e',
-                  backgroundColor: Colors.red.withOpacity(0.8),
-                  colorText: Colors.white,
-                  snackPosition: SnackPosition.BOTTOM,
-                  margin: const EdgeInsets.all(16),
-                );
-              }
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-            child: const Text('Leave All Rooms'),
           ),
         ],
       ),
@@ -283,7 +235,7 @@ class _HeroProfileCard extends StatelessWidget {
                 color: Colors.white.withOpacity(0.03),
               ),
             ),
-
+            
             Padding(
               padding: const EdgeInsets.all(20.0),
               child: Row(
@@ -293,29 +245,25 @@ class _HeroProfileCard extends StatelessWidget {
                     width: 80,
                     height: 80,
                     decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: const Color(0xFFE94560), width: 2),
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFFE94560).withOpacity(0.4),
-                            blurRadius: 15,
-                          )
-                        ]),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: const Color(0xFFE94560), width: 2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFE94560).withOpacity(0.4),
+                          blurRadius: 15,
+                        )
+                      ]
+                    ),
                     child: CircleAvatar(
                       backgroundColor: const Color(0xFF0D1B2A),
-                      backgroundImage: user?.avatarUrl != null
-                          ? NetworkImage(user!.avatarUrl!)
-                          : null,
-                      child: user?.avatarUrl == null
-                          ? Text(user?.username[0].toUpperCase() ?? "U",
-                              style: const TextStyle(
-                                  fontSize: 32, fontWeight: FontWeight.bold))
-                          : null,
+                      backgroundImage: user?.avatarUrl != null ? NetworkImage(user!.avatarUrl!) : null,
+                      child: user?.avatarUrl == null 
+                        ? Text(user?.username[0].toUpperCase() ?? "U", style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)) 
+                        : null,
                     ),
                   ),
                   const SizedBox(width: 20),
-
+                  
                   // Stats Info
                   Expanded(
                     child: Column(
@@ -332,39 +280,36 @@ class _HeroProfileCard extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: const Color(0xFF7C4DFF).withOpacity(0.2),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
                             user?.email ?? "",
-                            style: const TextStyle(
-                                color: Color(0xFFB47CFF), fontSize: 10),
+                            style: const TextStyle(color: Color(0xFFB47CFF), fontSize: 10),
                           ),
                         ),
                         const SizedBox(height: 12),
                         Row(
                           children: [
-                            _MiniStat(
-                              label: "WINS",
-                              value: "${stats?.gamesWon ?? 0}",
-                              color: const Color(0xFF4CAF50),
-                            ),
-                            const SizedBox(width: 16),
-                            _MiniStat(
-                              label: "GAMES",
-                              value: "${stats?.gamesPlayed ?? 0}",
-                              color: Colors.white70,
-                            ),
-                            const SizedBox(width: 16),
-                            _MiniStat(
-                              label: "RATE",
-                              value:
-                                  "${((stats?.winRate ?? 0) * 100).toInt()}%",
-                              color: Colors.amber,
-                            ),
+                             _MiniStat(
+                               label: "WINS", 
+                               value: "${stats?.gamesWon ?? 0}",
+                               color: const Color(0xFF4CAF50),
+                             ),
+                             const SizedBox(width: 16),
+                             _MiniStat(
+                               label: "GAMES", 
+                               value: "${stats?.gamesPlayed ?? 0}",
+                               color: Colors.white70,
+                             ),
+                             const SizedBox(width: 16),
+                             _MiniStat(
+                               label: "RATE", 
+                               value: "${((stats?.winRate ?? 0) * 100).toInt()}%",
+                               color: Colors.amber,
+                             ),
                           ],
                         )
                       ],
@@ -385,22 +330,15 @@ class _MiniStat extends StatelessWidget {
   final String value;
   final Color color;
 
-  const _MiniStat(
-      {required this.label, required this.value, required this.color});
+  const _MiniStat({required this.label, required this.value, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(value,
-            style: TextStyle(
-                color: color, fontWeight: FontWeight.bold, fontSize: 16)),
-        Text(label,
-            style: TextStyle(
-                color: Colors.white.withOpacity(0.4),
-                fontSize: 8,
-                fontWeight: FontWeight.w600)),
+        Text(value, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16)),
+        Text(label, style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 8, fontWeight: FontWeight.w600)),
       ],
     );
   }
@@ -423,44 +361,32 @@ class _ActionPortals extends StatelessWidget {
             child: Container(
               height: 160,
               decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFFE94560), Color(0xFF9C27B0)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                        color: const Color(0xFFE94560).withOpacity(0.4),
-                        blurRadius: 12,
-                        offset: const Offset(0, 6))
-                  ]),
+                borderRadius: BorderRadius.circular(20),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFFE94560), Color(0xFF9C27B0)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                boxShadow: [
+                  BoxShadow(color: const Color(0xFFE94560).withOpacity(0.4), blurRadius: 12, offset: const Offset(0, 6))
+                ]
+              ),
               child: Stack(
                 children: [
                   Positioned(
-                    bottom: -20,
-                    right: -20,
-                    child: Icon(Icons.add_circle,
-                        size: 100, color: Colors.white.withOpacity(0.2)),
+                    bottom: -20, right: -20,
+                    child: Icon(Icons.add_circle, size: 100, color: Colors.white.withOpacity(0.2)),
                   ),
                   const Padding(
                     padding: EdgeInsets.all(20.0),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.local_fire_department,
-                            color: Colors.white, size: 32),
+                        Icon(Icons.campfire, color: Colors.white, size: 32),
                         Spacer(),
-                        Text("HOST\nA GAME",
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w900,
-                                fontSize: 18,
-                                height: 1.1)),
+                        Text("HOST\nA GAME", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 18, height: 1.1)),
                         SizedBox(height: 4),
-                        Text("Create Village",
-                            style:
-                                TextStyle(color: Colors.white70, fontSize: 11)),
+                        Text("Create Village", style: TextStyle(color: Colors.white70, fontSize: 11)),
                       ],
                     ),
                   )
@@ -469,7 +395,7 @@ class _ActionPortals extends StatelessWidget {
             ),
           ),
         ),
-
+        
         const SizedBox(width: 16),
 
         // JOIN ROOM CARD
@@ -479,22 +405,18 @@ class _ActionPortals extends StatelessWidget {
             child: Container(
               height: 160,
               decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  color: const Color(0xFF243B53),
-                  border: Border.all(color: Colors.white.withOpacity(0.1)),
-                  boxShadow: [
-                    BoxShadow(
-                        color: Colors.black.withOpacity(0.3),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4))
-                  ]),
+                borderRadius: BorderRadius.circular(20),
+                color: const Color(0xFF243B53),
+                border: Border.all(color: Colors.white.withOpacity(0.1)),
+                boxShadow: [
+                  BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))
+                ]
+              ),
               child: Stack(
                 children: [
                   Positioned(
-                    bottom: -20,
-                    right: -20,
-                    child: Icon(Icons.login,
-                        size: 100, color: Colors.white.withOpacity(0.05)),
+                    bottom: -20, right: -20,
+                    child: Icon(Icons.login, size: 100, color: Colors.white.withOpacity(0.05)),
                   ),
                   const Padding(
                     padding: EdgeInsets.all(20.0),
@@ -503,16 +425,9 @@ class _ActionPortals extends StatelessWidget {
                       children: [
                         Icon(Icons.search, color: Color(0xFF40C4FF), size: 32),
                         Spacer(),
-                        Text("FIND\nA GAME",
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w900,
-                                fontSize: 18,
-                                height: 1.1)),
+                        Text("FIND\nA GAME", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 18, height: 1.1)),
                         SizedBox(height: 4),
-                        Text("Enter Code",
-                            style:
-                                TextStyle(color: Colors.white54, fontSize: 11)),
+                        Text("Enter Code", style: TextStyle(color: Colors.white54, fontSize: 11)),
                       ],
                     ),
                   )
@@ -534,11 +449,10 @@ class _RoomListSliver extends StatelessWidget {
   Widget build(BuildContext context) {
     return Obx(() {
       final roomProvider = Get.find<RoomProvider>();
-
+      
       if (roomProvider.isLoading.value) {
         return const SliverToBoxAdapter(
-          child: Center(
-              child: CircularProgressIndicator(color: Color(0xFFE94560))),
+          child: Center(child: CircularProgressIndicator(color: Color(0xFFE94560))),
         );
       }
 
@@ -577,19 +491,13 @@ class _VillageCard extends StatelessWidget {
   Widget build(BuildContext context) {
     bool isFull = room.currentPlayers >= room.maxPlayers;
 
-    // Check if current user is in this room
-    final currentUserId = Get.find<AuthProvider>().currentUser.value?.id;
-    final isUserInRoom = currentUserId != null &&
-        room.players.any((player) => player.userId == currentUserId);
-
     return GestureDetector(
-      onTap: isFull
-          ? null
-          : () async {
-              final success =
-                  await Get.find<RoomProvider>().joinRoom(room.roomCode);
-              if (success) Get.toNamed('/room/${room.id}');
-            },
+      onTap: isFull 
+        ? null 
+        : () async {
+            final success = await Get.find<RoomProvider>().joinRoom(room.roomCode);
+            if (success) Get.toNamed('/room/${room.id}');
+          },
       child: Container(
         height: 100,
         decoration: BoxDecoration(
@@ -603,12 +511,14 @@ class _VillageCard extends StatelessWidget {
             Container(
               width: 6,
               decoration: BoxDecoration(
-                  color: isFull ? Colors.red : const Color(0xFF00E676),
-                  borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(16),
-                      bottomLeft: Radius.circular(16))),
+                color: isFull ? Colors.red : const Color(0xFF00E676),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(16),
+                  bottomLeft: Radius.circular(16)
+                )
+              ),
             ),
-
+            
             // Icon
             Container(
               width: 80,
@@ -617,8 +527,7 @@ class _VillageCard extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: (isFull ? Colors.red : const Color(0xFF00E676))
-                      .withOpacity(0.1),
+                  color: (isFull ? Colors.red : const Color(0xFF00E676)).withOpacity(0.1),
                 ),
                 child: Icon(
                   isFull ? Icons.lock : Icons.meeting_room,
@@ -634,44 +543,40 @@ class _VillageCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    room.name,
+                    room.name, 
                     style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16),
+                      color: Colors.white, 
+                      fontWeight: FontWeight.bold, 
+                      fontSize: 16
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      Icon(Icons.person_outline,
-                          size: 12, color: Colors.white.withOpacity(0.5)),
+                      Icon(Icons.person_outline, size: 12, color: Colors.white.withOpacity(0.5)),
                       const SizedBox(width: 4),
                       Text(
                         "Host: ${room.host?.username ?? 'Unknown'}",
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.5), fontSize: 12),
+                        style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12),
                       ),
                     ],
                   ),
                   const SizedBox(height: 6),
                   // Room Code Pill (Small)
                   if (!room.isPrivate)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.05),
-                          borderRadius: BorderRadius.circular(4)),
-                      child: Text(
-                        "CODE: ${room.roomCode}",
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.3),
-                            fontSize: 9,
-                            letterSpacing: 1),
-                      ),
-                    )
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(4)
+                    ),
+                    child: Text(
+                      "CODE: ${room.roomCode}",
+                      style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 9, letterSpacing: 1),
+                    ),
+                  )
                 ],
               ),
             ),
@@ -685,80 +590,18 @@ class _VillageCard extends StatelessWidget {
                   Text(
                     "${room.currentPlayers}",
                     style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                        color: isFull ? Colors.red : Colors.white),
+                      fontSize: 24, 
+                      fontWeight: FontWeight.bold, 
+                      color: isFull ? Colors.red : Colors.white
+                    ),
                   ),
                   Text(
                     "/${room.maxPlayers}",
-                    style: TextStyle(
-                        color: Colors.white.withOpacity(0.3), fontSize: 12),
+                    style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12),
                   ),
                 ],
               ),
-            ),
-
-            // Leave Room Button (only show if user is in this room)
-            if (isUserInRoom)
-              Padding(
-                padding: const EdgeInsets.only(right: 12),
-                child: IconButton(
-                  icon: Icon(Icons.exit_to_app,
-                      color: Colors.red.withOpacity(0.7)),
-                  tooltip: 'Leave Village',
-                  onPressed: () async {
-                    final confirmed = await Get.dialog<bool>(
-                      AlertDialog(
-                        backgroundColor: const Color(0xFF1A1A2E),
-                        title: const Text('Leave Village?',
-                            style: TextStyle(color: Colors.white)),
-                        content: Text(
-                          'Are you sure you want to leave "${room.name}"?',
-                          style:
-                              TextStyle(color: Colors.white.withOpacity(0.7)),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Get.back(result: false),
-                            child: const Text('Cancel'),
-                          ),
-                          TextButton(
-                            onPressed: () => Get.back(result: true),
-                            child: const Text('Leave',
-                                style: TextStyle(color: Colors.red)),
-                          ),
-                        ],
-                      ),
-                    );
-
-                    if (confirmed == true) {
-                      try {
-                        final apiService = Get.find<ApiService>();
-                        await apiService.leaveRoom(room.id);
-                        Get.snackbar(
-                          'Success',
-                          'Left the village',
-                          backgroundColor: Colors.green.withOpacity(0.8),
-                          colorText: Colors.white,
-                          snackPosition: SnackPosition.BOTTOM,
-                          margin: const EdgeInsets.all(16),
-                        );
-                        // Refresh room list
-                        Get.find<RoomProvider>().fetchRooms();
-                      } catch (e) {
-                        Get.snackbar(
-                          'Error',
-                          'Failed to leave room: $e',
-                          backgroundColor: Colors.red.withOpacity(0.8),
-                          colorText: Colors.white,
-                          snackPosition: SnackPosition.BOTTOM,
-                          margin: const EdgeInsets.all(16),
-                        );
-                      }
-                    }
-                  },
-                ),
-              ),
+            )
           ],
         ),
       ),
@@ -776,18 +619,15 @@ class _EmptyVillageState extends StatelessWidget {
       alignment: Alignment.center,
       child: Column(
         children: [
-          Icon(Icons.nights_stay_outlined,
-              size: 60, color: Colors.white.withOpacity(0.2)),
+          Icon(Icons.nights_stay_outlined, size: 60, color: Colors.white.withOpacity(0.2)),
           const SizedBox(height: 16),
           Text(
             "The Village is Quiet...",
-            style:
-                TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 16),
+            style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 16),
           ),
           Text(
             "Start a fire to gather players.",
-            style:
-                TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12),
+            style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12),
           ),
         ],
       ),
@@ -824,42 +664,38 @@ class _MistPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
-
+    
     // 1. Deep Gradient Base
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
-    final gradient = const RadialGradient(
-      center: Alignment(0, -0.5), // Moon positionish
+    final gradient = RadialGradient(
+      center: const Alignment(0, -0.5), // Moon positionish
       radius: 1.5,
-      colors: [
+      colors: const [
         Color(0xFF1F2942), // Dark Blue Grey
         Color(0xFF0D1B2A), // Deepest Black/Blue
       ],
-      stops: [0.0, 1.0],
+      stops: const [0.0, 1.0],
     );
     paint.shader = gradient.createShader(rect);
     canvas.drawRect(rect, paint);
 
     // 2. Animated Particles (Fireflies)
-    final random =
-        math.Random(42); // Fixed seed for consistent placement pattern
+    final random = math.Random(42); // Fixed seed for consistent placement pattern
     final particlePaint = Paint()..style = PaintingStyle.fill;
 
     for (int i = 0; i < 30; i++) {
       // Calculate position based on animation loop
       double speed = 0.2 + (random.nextDouble() * 0.8);
-      double x = (random.nextDouble() * size.width) +
-          (math.sin(animationValue * 2 * math.pi * speed) * 20);
-      double y = (random.nextDouble() * size.height) -
-          (animationValue * size.height * speed * 0.5);
-
+      double x = (random.nextDouble() * size.width) + (math.sin(animationValue * 2 * math.pi * speed) * 20);
+      double y = (random.nextDouble() * size.height) - (animationValue * size.height * speed * 0.5);
+      
       // Wrap around Y
       if (y < 0) y += size.height;
 
       // Pulse opacity
       double opacity = 0.3 + (0.5 * math.sin((animationValue + i) * math.pi));
-
-      particlePaint.color =
-          const Color(0xFFF5F3CE).withOpacity(opacity.abs().clamp(0.0, 0.8));
+      
+      particlePaint.color = const Color(0xFFF5F3CE).withOpacity(opacity.abs().clamp(0.0, 0.8));
       canvas.drawCircle(Offset(x, y), 1.5 + random.nextDouble(), particlePaint);
     }
   }
@@ -875,18 +711,12 @@ class _GlassIconButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
   final Color? color;
-  final String? tooltip;
 
-  const _GlassIconButton({
-    required this.icon,
-    required this.onTap,
-    this.color,
-    this.tooltip,
-  });
+  const _GlassIconButton({required this.icon, required this.onTap, this.color});
 
   @override
   Widget build(BuildContext context) {
-    final button = ClipRRect(
+    return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: BackdropFilter(
         filter: ui.ImageFilter.blur(sigmaX: 5, sigmaY: 5),
@@ -896,15 +726,14 @@ class _GlassIconButton extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white.withOpacity(0.1))),
+              color: Colors.white.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withOpacity(0.1))
+            ),
             child: Icon(icon, color: color ?? Colors.white, size: 20),
           ),
         ),
       ),
     );
-
-    return tooltip != null ? Tooltip(message: tooltip!, child: button) : button;
   }
 }

@@ -5,15 +5,15 @@
 # After create room, copy "room_id" and "room_code" values
 # Example: @token1 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
-@token1 = YOUR_TOKEN_HERE
-@token2 = YOUR_TOKEN_HERE
-@token3 = YOUR_TOKEN_HERE
-@userId1 = YOUR_USER_ID_HERE
-@userId2 = YOUR_USER_ID_HERE
-@userId3 = YOUR_USER_ID_HERE
-@roomId = YOUR_ROOM_ID_HERE
+@token1 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNzEwZjIzMTUtZDUwMy00NWFlLTkyN2UtZDcwMWM4MTQyZTY5IiwidXNlcm5hbWUiOiJwbGF5ZXIxIiwiZXhwIjoxNzY1Mjc3NTI3LCJuYmYiOjE3NjUxOTExMjcsImlhdCI6MTc2NTE5MTEyN30.9fqlCqAcz_mavyLVLsB3m4Yyn5Esi_1kxp-HyGmse6o
+@token2 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjEyYzkyZjgtOTAyYS00NDg3LTk0ZTQtNjA1NjVlYmE0ZmFmIiwidXNlcm5hbWUiOiJwbGF5ZXIyIiwiZXhwIjoxNzY1Mjc3NjUwLCJuYmYiOjE3NjUxOTEyNTAsImlhdCI6MTc2NTE5MTI1MH0.RIasKqPwKFz9yvPlP4EBmODki9tSagcRCwmHuGk2aGw
+@token3 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDQ2NjhmYmUtNDllZC00NDg1LThkM2QtN2RmNmY3MjcxODg0IiwidXNlcm5hbWUiOiJwbGF5ZXIzIiwiZXhwIjoxNzY1Mjc3Njk0LCJuYmYiOjE3NjUxOTEyOTQsImlhdCI6MTc2NTE5MTI5NH0.P-HxHtlOClkJKyEqIYrBNI-RuiAlmCuimllIGNtb_VY
+@userId1 = 710f2315-d503-45ae-927e-d701c8142e69
+@userId2 = 612c92f8-902a-4487-94e4-60565eba4faf
+@userId3 = 44668fbe-49ed-4485-8d3d-7df6f7271884
+@roomId = c2403a57-fd74-4aad-aa4a-207f598a9623
 @sessionId = YOUR_SESSION_ID_HERE
-@roomCode = YOUR_ROOM_CODE_HERE 
+@roomCode = QXEFRX 
 
 ################################################################################
 # 1. AUTHENTICATION - Create 3 test players
