@@ -29,7 +29,6 @@ class _NightActionPanelState extends State<NightActionPanel> {
       }
 
       final phase = gameProvider.currentPhase;
-      final role = myPlayer.role;
 
       switch (phase) {
         case GamePhase.cupidPhase:
@@ -251,6 +250,39 @@ class _NightActionPanelState extends State<NightActionPanel> {
               ],
             ),
             const SizedBox(height: 16),
+
+            // Potion Status Display
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildPotionStatus(
+                        icon: Icons.healing,
+                        label: 'Heal Potion',
+                        used: myPlayer.hasUsedHeal,
+                        color: Colors.green,
+                      ),
+                      _buildPotionStatus(
+                        icon: Icons.dangerous,
+                        label: 'Poison Potion',
+                        used: myPlayer.hasUsedPoison,
+                        color: Colors.deepPurple,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
             if (!myPlayer.hasUsedHeal)
               SizedBox(
                 width: double.infinity,
@@ -261,13 +293,37 @@ class _NightActionPanelState extends State<NightActionPanel> {
                     backgroundColor: Colors.green,
                   ),
                   icon: const Icon(Icons.healing),
-                  label: const Text('Use Healing Potion'),
+                  label: const Text('Use Healing Potion (Save Victim)'),
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade200,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.grey),
+                    SizedBox(width: 8),
+                    Text(
+                      'Healing potion already used',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ],
                 ),
               ),
+
             if (!myPlayer.hasUsedHeal && !myPlayer.hasUsedPoison)
               const SizedBox(height: 12),
+
             if (!myPlayer.hasUsedPoison) ...[
-              const Text('Select target to poison:'),
+              const Divider(height: 24),
+              const Text(
+                'Select target to poison:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 8),
               _buildPlayerDropdown(selectablePlayers, selectedTarget1, (value) {
                 setState(() => selectedTarget1 = value);
@@ -284,10 +340,28 @@ class _NightActionPanelState extends State<NightActionPanel> {
                     backgroundColor: Colors.deepPurple,
                   ),
                   icon: const Icon(Icons.dangerous),
-                  label: const Text('Use Poison'),
+                  label: const Text('Use Poison (Kill Target)'),
                 ),
               ),
-            ],
+            ] else
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade200,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.grey),
+                    SizedBox(width: 8),
+                    Text(
+                      'Poison already used',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
@@ -299,6 +373,51 @@ class _NightActionPanelState extends State<NightActionPanel> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildPotionStatus({
+    required IconData icon,
+    required String label,
+    required bool used,
+    required Color color,
+  }) {
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: used ? Colors.grey.shade300 : color.withOpacity(0.2),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: used ? Colors.grey : color,
+              width: 2,
+            ),
+          ),
+          child: Icon(
+            icon,
+            color: used ? Colors.grey : color,
+            size: 32,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: used ? Colors.grey : Colors.black87,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        Text(
+          used ? 'Used' : 'Available',
+          style: TextStyle(
+            fontSize: 10,
+            color: used ? Colors.grey : color,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
     );
   }
 

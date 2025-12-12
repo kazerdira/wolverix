@@ -22,7 +22,7 @@ class WebSocketService extends getx.GetxService {
 
   // For Android Emulator use: ws://10.0.2.2:8080/api/v1/ws
   // For physical device use: ws://YOUR_COMPUTER_IP:8080/api/v1/ws
-  static const String wsBaseUrl = 'ws://192.168.1.44:8080/api/v1/ws';
+  static const String wsBaseUrl = 'ws://192.168.1.15:8080/api/v1/ws';
 
   bool get isConnected => _isConnected;
 

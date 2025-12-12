@@ -13,7 +13,7 @@ class ApiService extends getx.GetxService {
   // For Android Emulator use: 10.0.2.2
   // For physical device use: your computer's IP address (e.g., 192.168.1.x)
   // For iOS Simulator use: localhost
-  static const String baseUrl = 'http://192.168.1.44:8080/api/v1';
+  static const String baseUrl = 'http://192.168.1.15:8080/api/v1';
 
   @override
   void onInit() {
@@ -214,7 +214,8 @@ class ApiService extends getx.GetxService {
     };
 
     if (targetPlayerId != null) {
-      requestData['target_player_id'] = targetPlayerId;
+      requestData['target_id'] =
+          targetPlayerId; // Backend expects 'target_id' not 'target_player_id'
     }
 
     // Merge additional data (for Cupid's second target, etc.)

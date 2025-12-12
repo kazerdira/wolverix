@@ -200,6 +200,7 @@ type GamePlayer struct {
 	RoleState           RoleState  `json:"role_state"`
 	LoverID             *uuid.UUID `json:"lover_id,omitempty"`
 	CurrentVoiceChannel string     `json:"current_voice_channel"`
+	AllowedChatChannels []string   `json:"allowed_chat_channels"` // Which chat channels player can send to
 	SeatPosition        int        `json:"seat_position"`
 	JoinedAt            time.Time  `json:"joined_at"`
 
@@ -234,8 +235,9 @@ const (
 
 type RoleState struct {
 	// Witch specific
-	HealUsed   bool `json:"heal_used,omitempty"`
-	PoisonUsed bool `json:"poison_used,omitempty"`
+	HealUsed           bool       `json:"heal_used,omitempty"`
+	PoisonUsed         bool       `json:"poison_used,omitempty"`
+	CurrentNightVictim *uuid.UUID `json:"current_night_victim,omitempty"` // Shows Witch who wolves are targeting
 
 	// Hunter specific
 	HasShot bool `json:"has_shot,omitempty"`

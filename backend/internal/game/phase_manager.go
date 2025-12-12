@@ -56,14 +56,23 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 	}
 	defer tx.Rollback(ctx)
 
-	// Get current state
+	// Get current state and room config
 	var currentPhase models.GamePhase
 	var phaseNumber, dayNumber int
+	var roomID uuid.UUID
 	err = tx.QueryRow(ctx, `
-		SELECT current_phase, phase_number, day_number FROM game_sessions WHERE id = $1
-	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber)
+		SELECT gs.current_phase, gs.phase_number, gs.day_number, gs.room_id 
+		FROM game_sessions gs WHERE gs.id = $1
+	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber, &roomID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current phase: %w", err)
+	}
+
+	// Get room config for phase duration
+	var dayPhaseSeconds int
+	err = tx.QueryRow(ctx, `SELECT (config->>'day_phase_seconds')::int FROM rooms WHERE id = $1`, roomID).Scan(&dayPhaseSeconds)
+	if err != nil || dayPhaseSeconds == 0 {
+		dayPhaseSeconds = 300 // Default 5 minutes
 	}
 
 	if currentPhase != models.GamePhaseNight {
@@ -84,8 +93,8 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 	// Increment day number
 	dayNumber++
 
-	// Update to day phase
-	phaseEndsAt := time.Now().Add(5 * time.Minute) // 5 minute day discussion
+	// Update to day phase with configured duration
+	phaseEndsAt := time.Now().Add(time.Duration(dayPhaseSeconds) * time.Second)
 	_, err = tx.Exec(ctx, `
 		UPDATE game_sessions
 		SET current_phase = $1, phase_number = phase_number + 1, day_number = $2,
@@ -123,9 +132,9 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Schedule automatic transition to voting phase (5 minutes)
+	// Schedule automatic transition to voting phase
 	if pm.scheduler != nil {
-		pm.scheduler.SchedulePhaseEnd(sessionID, 5*time.Minute)
+		pm.scheduler.SchedulePhaseEnd(sessionID, time.Duration(dayPhaseSeconds)*time.Second)
 	}
 
 	// Check win conditions AFTER committing (separate transaction)
@@ -137,6 +146,11 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 	// Cancel scheduler if game ended
 	if winCondition.GameEnded && pm.scheduler != nil {
 		pm.scheduler.CancelPhaseEnd(sessionID)
+	}
+
+	// Update voice channels for day phase (everyone alive joins main)
+	if err := pm.UpdateVoiceChannels(ctx, sessionID, models.GamePhaseDay); err != nil {
+		fmt.Printf("Warning: failed to update voice channels: %v\n", err)
 	}
 
 	transition := &PhaseTransition{
@@ -155,6 +169,9 @@ func (pm *PhaseManager) TransitionToDay(ctx context.Context, sessionID uuid.UUID
 
 // TransitionToVoting moves from day to voting phase
 func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.UUID) (*PhaseTransition, error) {
+	// Declare votingSeconds outside transaction so it can be used after commit
+	var votingSeconds int = 60 // Default 1 minute
+
 	tx, err := pm.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -163,9 +180,20 @@ func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.U
 
 	var currentPhase models.GamePhase
 	var phaseNumber, dayNumber int
+	var roomID uuid.UUID
 	err = tx.QueryRow(ctx, `
-		SELECT current_phase, phase_number, day_number FROM game_sessions WHERE id = $1
-	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber)
+		SELECT gs.current_phase, gs.phase_number, gs.day_number, gs.room_id
+		FROM game_sessions gs WHERE gs.id = $1
+	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber, &roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get room config for voting duration
+	err = tx.QueryRow(ctx, `SELECT (config->>'voting_seconds')::int FROM rooms WHERE id = $1`, roomID).Scan(&votingSeconds)
+	if err != nil || votingSeconds == 0 {
+		votingSeconds = 60 // Default 1 minute
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +202,8 @@ func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.U
 		return nil, fmt.Errorf("can only transition to voting from day phase")
 	}
 
-	// Update to voting phase
-	phaseEndsAt := time.Now().Add(1 * time.Minute) // 1 minute voting
+	// Update to voting phase with configured duration
+	phaseEndsAt := time.Now().Add(time.Duration(votingSeconds) * time.Second)
 	_, err = tx.Exec(ctx, `
 		UPDATE game_sessions
 		SET current_phase = $1, phase_number = phase_number + 1,
@@ -216,9 +244,9 @@ func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.U
 		return nil, err
 	}
 
-	// Schedule automatic transition to night phase (1 minute voting)
+	// Schedule automatic transition to night phase
 	if pm.scheduler != nil {
-		pm.scheduler.SchedulePhaseEnd(sessionID, 1*time.Minute)
+		pm.scheduler.SchedulePhaseEnd(sessionID, time.Duration(votingSeconds)*time.Second)
 	}
 
 	transition := &PhaseTransition{
@@ -235,6 +263,9 @@ func (pm *PhaseManager) TransitionToVoting(ctx context.Context, sessionID uuid.U
 
 // TransitionToNight moves from voting to night (after processing lynch)
 func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UUID, lynchedPlayerID *uuid.UUID) (*PhaseTransition, error) {
+	// Declare nightPhaseSeconds outside transaction so it can be used after commit
+	var nightPhaseSeconds int = 120 // Default 2 minutes
+
 	tx, err := pm.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -243,9 +274,20 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 
 	var currentPhase models.GamePhase
 	var phaseNumber, dayNumber int
+	var roomID uuid.UUID
 	err = tx.QueryRow(ctx, `
-		SELECT current_phase, phase_number, day_number FROM game_sessions WHERE id = $1
-	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber)
+		SELECT gs.current_phase, gs.phase_number, gs.day_number, gs.room_id
+		FROM game_sessions gs WHERE gs.id = $1
+	`, sessionID).Scan(&currentPhase, &phaseNumber, &dayNumber, &roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get room config for night duration
+	err = tx.QueryRow(ctx, `SELECT (config->>'night_phase_seconds')::int FROM rooms WHERE id = $1`, roomID).Scan(&nightPhaseSeconds)
+	if err != nil || nightPhaseSeconds == 0 {
+		nightPhaseSeconds = 120 // Default 2 minutes
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +350,15 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		defer tx.Rollback(ctx)
 	}
 
+	// Get room ID and night phase duration
+	err = tx.QueryRow(ctx, `SELECT room_id FROM game_sessions WHERE id = $1`, sessionID).Scan(&roomID)
+	if err == nil {
+		err = tx.QueryRow(ctx, `SELECT (config->>'night_phase_seconds')::int FROM rooms WHERE id = $1`, roomID).Scan(&nightPhaseSeconds)
+		if err != nil || nightPhaseSeconds == 0 {
+			nightPhaseSeconds = 120 // Default 2 minutes
+		}
+	}
+
 	// Get alive players with night action roles
 	rows, err := tx.Query(ctx, `
 		SELECT DISTINCT role FROM game_players 
@@ -343,8 +394,8 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		return nil, err
 	}
 
-	// Update to night phase
-	phaseEndsAt := time.Now().Add(2 * time.Minute) // 2 minute night
+	// Update to night phase with configured duration
+	phaseEndsAt := time.Now().Add(time.Duration(nightPhaseSeconds) * time.Second)
 	_, err = tx.Exec(ctx, `
 		UPDATE game_sessions
 		SET current_phase = $1, phase_number = phase_number + 1,
@@ -384,9 +435,14 @@ func (pm *PhaseManager) TransitionToNight(ctx context.Context, sessionID uuid.UU
 		return nil, err
 	}
 
-	// Schedule automatic transition to day phase (2 minute night)
+	// Schedule automatic transition to day phase
 	if pm.scheduler != nil {
-		pm.scheduler.SchedulePhaseEnd(sessionID, 2*time.Minute)
+		pm.scheduler.SchedulePhaseEnd(sessionID, time.Duration(nightPhaseSeconds)*time.Second)
+	}
+
+	// Update voice channels for night phase (werewolves get private, others silenced)
+	if err := pm.UpdateVoiceChannels(ctx, sessionID, models.GamePhaseNight); err != nil {
+		fmt.Printf("Warning: failed to update voice channels: %v\n", err)
 	}
 
 	transition := &PhaseTransition{
@@ -460,4 +516,72 @@ type GamePhaseInfo struct {
 	DayNumber   int
 	StartedAt   time.Time
 	EndsAt      *time.Time
+}
+
+// UpdateVoiceChannels updates all players' voice channels based on the current phase
+// Night: Werewolves get private channel, everyone else is silenced
+// Day: Everyone alive joins main channel
+func (pm *PhaseManager) UpdateVoiceChannels(ctx context.Context, sessionID uuid.UUID, phase models.GamePhase) error {
+	// Get all players in the session
+	rows, err := pm.db.Query(ctx, `
+		SELECT id, role, is_alive FROM game_players WHERE session_id = $1
+	`, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get players for voice update: %w", err)
+	}
+	defer rows.Close()
+
+	type playerInfo struct {
+		id      uuid.UUID
+		role    string
+		isAlive bool
+	}
+	var players []playerInfo
+	for rows.Next() {
+		var p playerInfo
+		if err := rows.Scan(&p.id, &p.role, &p.isAlive); err != nil {
+			continue
+		}
+		players = append(players, p)
+	}
+
+	// Determine channel assignments based on phase
+	for _, p := range players {
+		var channel string
+		var allowedChannels []string
+
+		if !p.isAlive {
+			// Dead players go to dead channel
+			channel = string(models.ChannelTypeDead)
+			allowedChannels = []string{string(models.ChannelTypeDead)}
+		} else if phase == models.GamePhaseNight || phase == models.GamePhaseNight0 {
+			// Night phase: werewolves get private channel, others are silenced
+			if p.role == string(models.RoleWerewolf) {
+				channel = string(models.ChannelTypeWerewolf)
+				allowedChannels = []string{string(models.ChannelTypeWerewolf)}
+			} else {
+				// Non-werewolves are silenced during night (no channel)
+				channel = ""
+				allowedChannels = []string{}
+			}
+		} else {
+			// Day/Voting phase: everyone alive joins main channel
+			channel = string(models.ChannelTypeMain)
+			allowedChannels = []string{string(models.ChannelTypeMain)}
+		}
+
+		// Update player's voice channel and allowed chat channels
+		// Use pq.Array for PostgreSQL TEXT[] type
+		_, err := pm.db.Exec(ctx, `
+			UPDATE game_players 
+			SET current_voice_channel = $1, allowed_chat_channels = $2
+			WHERE id = $3
+		`, channel, allowedChannels, p.id)
+		if err != nil {
+			// Log but don't fail the whole operation
+			fmt.Printf("Warning: failed to update voice channel for player %s: %v\n", p.id, err)
+		}
+	}
+
+	return nil
 }

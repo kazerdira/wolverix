@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import '../models/models.dart';
@@ -7,6 +8,8 @@ import '../services/websocket_service.dart';
 import '../services/storage_service.dart';
 import '../utils/error_handler.dart';
 import '../screens/game/role_reveal_screen.dart';
+import '../widgets/death_overlay.dart';
+import 'voice_provider.dart';
 
 class GameProvider extends GetxController {
   final ApiService _api = Get.find<ApiService>();
@@ -19,6 +22,12 @@ class GameProvider extends GetxController {
   final RxBool isLoading = false.obs;
   final RxString errorMessage = ''.obs;
   final Rx<Duration> phaseTimeRemaining = Duration.zero.obs;
+
+  // NEW: Vote tracking
+  final RxMap<String, String> currentVotes =
+      <String, String>{}.obs; // voterId -> targetId
+  final RxMap<String, int> voteCount = <String, int>{}.obs; // targetId -> count
+  final RxInt totalVotes = 0.obs;
 
   Timer? _phaseTimer;
   StreamSubscription? _wsSubscription;
@@ -56,6 +65,15 @@ class GameProvider extends GetxController {
           break;
         case 'player_action': // Backend sends action notifications
           _handlePlayerAction(message.payload);
+          break;
+        case 'player_voted': // NEW: Vote synchronization
+          _handlePlayerVoted(message.payload);
+          break;
+        case 'vote_result': // NEW: Vote count updates
+          _handleVoteResult(message.payload);
+          break;
+        case 'night_actions_complete': // NEW: All actions submitted
+          _handleNightActionsComplete(message.payload);
           break;
         case 'game_end':
           _handleGameEnd(message.payload);
@@ -141,7 +159,7 @@ class GameProvider extends GetxController {
   // Convenience action methods
   Future<bool> vote(String targetPlayerId) async {
     return performAction(
-      actionType: 'lynch_vote',
+      actionType: 'vote_lynch',
       targetPlayerId: targetPlayerId,
     );
   }
@@ -207,7 +225,19 @@ class GameProvider extends GetxController {
   }
 
   void _handlePhaseChange(Map<String, dynamic> payload) {
+    print('🔄 Phase change received: $payload');
     final newPhase = GamePhase.fromString(payload['phase'] as String);
+    final newPhaseEndTime = payload['phase_end_time'] != null
+        ? DateTime.parse(payload['phase_end_time'])
+        : null;
+
+    print('📅 New phase: $newPhase, End time: $newPhaseEndTime');
+
+    // Clear votes when phase changes
+    currentVotes.clear();
+    voteCount.clear();
+    totalVotes.value = 0;
+
     if (session.value != null) {
       session.value = GameSession(
         id: session.value!.id,
@@ -215,15 +245,68 @@ class GameProvider extends GetxController {
         currentPhase: newPhase,
         phaseNumber: payload['phase_number'] ?? session.value!.phaseNumber,
         dayNumber: payload['day_number'] ?? session.value!.dayNumber,
-        phaseEndTime: payload['phase_end_time'] != null
-            ? DateTime.parse(payload['phase_end_time'])
-            : null,
+        phaseEndTime: newPhaseEndTime,
         winner: session.value!.winner,
         state: session.value!.state,
         startedAt: session.value!.startedAt,
         players: session.value!.players,
       );
       _updatePhaseTimer();
+
+      // NEW: Automatic voice channel switching
+      _handleVoiceChannelSwitch(newPhase);
+    }
+  }
+
+  void _handleVoiceChannelSwitch(GamePhase newPhase) {
+    // Only manage voice if player is alive and we have a session
+    if (myPlayer.value == null ||
+        !myPlayer.value!.isAlive ||
+        session.value == null) {
+      return;
+    }
+
+    try {
+      final voiceProvider = Get.find<VoiceProvider>();
+      final sessionId = session.value!.id;
+      final myRole = myPlayer.value!.role;
+
+      // Determine target channel based on phase and role
+      String channelName = 'game_${sessionId}_all'; // Default: all players
+
+      // Werewolf-specific phase: only werewolves join werewolf channel
+      if (newPhase == GamePhase.werewolfPhase ||
+          newPhase == GamePhase.night0 && myRole == GameRole.werewolf) {
+        if (myRole == GameRole.werewolf) {
+          channelName = 'game_${sessionId}_werewolves';
+        }
+      }
+      // Day phases: everyone in main channel
+      else if (newPhase == GamePhase.dayDiscussion ||
+          newPhase == GamePhase.dayVoting ||
+          newPhase == GamePhase.defensePhase ||
+          newPhase == GamePhase.finalVote) {
+        channelName = 'game_${sessionId}_all';
+      }
+      // Other night phases: everyone in main channel but muted
+      else {
+        channelName = 'game_${sessionId}_all';
+      }
+
+      // Switch channel if different from current
+      if (voiceProvider.isInitialized.value &&
+          voiceProvider.currentChannel.value != channelName) {
+        print(
+            '🔊 Switching voice channel: ${voiceProvider.currentChannel.value} → $channelName');
+        voiceProvider.switchChannel(channelName);
+      }
+
+      // Handle muting based on phase and role
+      voiceProvider.handlePhaseChange(
+          newPhase, myRole, myPlayer.value!.isAlive);
+    } catch (e) {
+      print('⚠️ Voice channel switch error: $e');
+      // Don't block game if voice fails
     }
   }
 
@@ -336,33 +419,6 @@ class GameProvider extends GetxController {
     }
   }
 
-  void _handleSeerResult(Map<String, dynamic> payload) {
-    events.add(
-      GameEvent(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        sessionId: session.value?.id ?? '',
-        phaseNumber: session.value?.phaseNumber ?? 0,
-        eventType: 'seer_result',
-        eventData: payload,
-        isPublic: false,
-        createdAt: DateTime.now(),
-      ),
-    );
-
-    // Show seer result dialog/notification
-    final targetName = payload['target_name'] ?? 'Unknown';
-    final isWerewolf = payload['is_werewolf'] as bool;
-    Get.snackbar(
-      'Vision Result',
-      '$targetName is ${isWerewolf ? "a WEREWOLF!" : "NOT a werewolf"}',
-      duration: const Duration(seconds: 5),
-    );
-  }
-
-  void _handleVoteUpdate(Map<String, dynamic> payload) {
-    loadGame(session.value!.id);
-  }
-
   void _handleGameEnd(Map<String, dynamic> payload) {
     final winner = payload['winning_team'] as String;
     if (session.value != null) {
@@ -426,13 +482,61 @@ class GameProvider extends GetxController {
 
       if (myPlayer.value?.id == playerId) {
         myPlayer.value = updatedPlayers.firstWhere((p) => p.id == playerId);
+
+        // NEW: Handle voice when I die
+        _handleDeathVoiceChannel();
+
+        // Show death overlay with animation
+        final deathReason = payload['death_reason'] as String? ?? 'eliminated';
+        _showDeathOverlay(myPlayer.value!.user?.username ?? 'You', deathReason);
       }
+    }
+  }
+
+  void _showDeathOverlay(String playerName, String deathReason) {
+    Get.dialog(
+      DeathOverlay(
+        playerName: playerName,
+        deathReason: deathReason,
+        onDismiss: () {
+          Get.back();
+        },
+      ),
+      barrierDismissible: false,
+      barrierColor: Colors.transparent,
+    );
+  }
+
+  void _handleDeathVoiceChannel() {
+    // When player dies, mute them permanently
+    try {
+      final voiceProvider = Get.find<VoiceProvider>();
+      if (voiceProvider.isInitialized.value) {
+        // Mute the dead player
+        voiceProvider.setMute(true);
+
+        // Optional: Move to dead channel (if backend supports it)
+        // final sessionId = session.value?.id;
+        // if (sessionId != null) {
+        //   voiceProvider.switchChannel('game_${sessionId}_dead');
+        // }
+      }
+    } catch (e) {
+      print('⚠️ Voice handling on death error: $e');
     }
   }
 
   void _handleTimer(Map<String, dynamic> payload) {
     // Backend sends timer updates for phase countdown synchronization
-    if (payload['phase_ends_at'] != null) {
+    // Priority 1: Use time_remaining_seconds for direct sync
+    if (payload['time_remaining_seconds'] != null) {
+      final remainingSeconds = payload['time_remaining_seconds'] as int;
+      if (remainingSeconds >= 0) {
+        phaseTimeRemaining.value = Duration(seconds: remainingSeconds);
+      }
+    }
+    // Priority 2: Use phase_ends_at for calculation
+    else if (payload['phase_ends_at'] != null) {
       final endsAt = DateTime.parse(payload['phase_ends_at'] as String);
       if (session.value != null) {
         session.value = GameSession(
@@ -456,8 +560,10 @@ class GameProvider extends GetxController {
     // Backend notifies when a player performs an action (for UI feedback)
     final actionType = payload['action_type'] as String?;
     final playerName = payload['player_name'] as String?;
+    final actionDisplay = payload['action_display'] as String?;
 
-    if (actionType != null && playerName != null) {
+    if (actionType != null) {
+      // Add to event history
       events.add(
         GameEvent(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -469,7 +575,31 @@ class GameProvider extends GetxController {
           createdAt: DateTime.now(),
         ),
       );
+
+      // Show notification for public/visible actions
+      final isPublic = payload['is_public'] as bool? ?? false;
+      if (isPublic && actionDisplay != null) {
+        Get.snackbar(
+          'Action Performed',
+          actionDisplay,
+          duration: const Duration(seconds: 3),
+          snackPosition: SnackPosition.TOP,
+          backgroundColor: Get.theme.colorScheme.surface.withOpacity(0.9),
+        );
+      }
+
+      // Show generic feedback for private actions (just that someone acted)
+      else if (!isPublic && actionType != 'skip' && playerName == null) {
+        // Don't reveal who, just that actions are happening
+        _showActionProgress();
+      }
     }
+  }
+
+  void _showActionProgress() {
+    // Show subtle progress that actions are being submitted
+    // This creates tension without revealing information
+    update(); // Refresh UI to show any action counters
   }
 
   void _handleError(Map<String, dynamic> payload) {
@@ -479,6 +609,102 @@ class GameProvider extends GetxController {
       errorMessage.value,
       duration: const Duration(seconds: 3),
     );
+  }
+
+  void _handlePlayerVoted(Map<String, dynamic> payload) {
+    // Real-time vote notification
+    final voterId = payload['voter_id'] as String?;
+    final voterName = payload['voter_name'] as String?;
+    final targetId = payload['target_id'] as String?;
+    final targetName = payload['target_name'] as String?;
+    final voteType = payload['vote_type'] as String? ?? 'lynch';
+
+    if (voterId != null && targetId != null) {
+      // Track the vote
+      currentVotes[voterId] = targetId;
+      totalVotes.value = currentVotes.length;
+
+      // Recalculate vote counts
+      _recalculateVoteCounts();
+
+      // Add to events for history
+      if (voterName != null && targetName != null) {
+        events.add(
+          GameEvent(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            sessionId: session.value?.id ?? '',
+            phaseNumber: session.value?.phaseNumber ?? 0,
+            eventType: 'player_voted',
+            eventData: payload,
+            isPublic:
+                voteType == 'lynch', // Lynch votes public, werewolf private
+            createdAt: DateTime.now(),
+          ),
+        );
+
+        // Show subtle notification (only for public votes)
+        if (voteType == 'lynch') {
+          Get.snackbar(
+            'Vote Cast',
+            '$voterName voted for $targetName',
+            duration: const Duration(seconds: 2),
+            snackPosition: SnackPosition.TOP,
+            backgroundColor: Get.theme.colorScheme.surface.withOpacity(0.9),
+          );
+        }
+      }
+    }
+  }
+
+  void _recalculateVoteCounts() {
+    // Clear and recalculate vote counts
+    final counts = <String, int>{};
+    for (final targetId in currentVotes.values) {
+      counts[targetId] = (counts[targetId] ?? 0) + 1;
+    }
+    voteCount.value = counts;
+  }
+
+  void _handleVoteResult(Map<String, dynamic> payload) {
+    // Update vote counts in real-time (alternative to tracking individual votes)
+    final targetId = payload['target_id'] as String?;
+    final count = payload['vote_count'] as int?;
+    final total = payload['total_votes'] as int?;
+
+    if (targetId != null && count != null) {
+      voteCount[targetId] = count;
+      if (total != null) {
+        totalVotes.value = total;
+      }
+
+      // Optional: Show vote progress
+      if (total != null && session.value != null) {
+        final alivePlayers =
+            session.value!.players.where((p) => p.isAlive).length;
+        if (total == alivePlayers) {
+          Get.snackbar(
+            'All Votes In',
+            'Everyone has voted! Phase ending soon...',
+            duration: const Duration(seconds: 3),
+            backgroundColor: Get.theme.colorScheme.primary.withOpacity(0.9),
+          );
+        }
+      }
+    }
+  }
+
+  void _handleNightActionsComplete(Map<String, dynamic> payload) {
+    // Notify when all night actions are submitted
+    final allSubmitted = payload['all_submitted'] as bool? ?? false;
+
+    if (allSubmitted) {
+      Get.snackbar(
+        'Night Actions Complete',
+        'All players have submitted their actions. Phase ending...',
+        duration: const Duration(seconds: 3),
+        backgroundColor: Get.theme.colorScheme.primary.withOpacity(0.9),
+      );
+    }
   }
 
   void _updatePhaseTimer() {
@@ -525,6 +751,15 @@ class GameProvider extends GetxController {
     final role = myPlayer.value!.role;
 
     switch (phase) {
+      // Night phase (night_0) - all night roles can act simultaneously
+      case GamePhase.night0:
+        return role == GameRole.werewolf ||
+            role == GameRole.seer ||
+            role == GameRole.witch ||
+            role == GameRole.bodyguard ||
+            role == GameRole.cupid;
+
+      // Specific role phases (if backend ever uses them)
       case GamePhase.cupidPhase:
         return role == GameRole.cupid;
       case GamePhase.werewolfPhase:
@@ -535,12 +770,23 @@ class GameProvider extends GetxController {
         return role == GameRole.witch;
       case GamePhase.bodyguardPhase:
         return role == GameRole.bodyguard;
+
+      // Day phases
+      case GamePhase.dayDiscussion:
+        return false; // Discussion phase - no actions, just chat
       case GamePhase.dayVoting:
       case GamePhase.finalVote:
         return true; // All alive players can vote
+
+      // Special phases
       case GamePhase.hunterPhase:
         return role == GameRole.hunter;
-      default:
+      case GamePhase.defensePhase:
+        // Player being lynched can defend themselves
+        // TODO: Check if myPlayer is the one on trial
+        return false;
+      case GamePhase.mayorReveal:
+      case GamePhase.gameOver:
         return false;
     }
   }
@@ -549,7 +795,30 @@ class GameProvider extends GetxController {
     if (session.value == null) return [];
 
     final phase = currentPhase;
+    final role = myPlayer.value?.role;
     final alivePlayers = session.value!.alivePlayers;
+
+    // Handle night_0 phase - filter based on role
+    if (phase == GamePhase.night0) {
+      switch (role) {
+        case GameRole.werewolf:
+          // Werewolves can't target other werewolves
+          return alivePlayers
+              .where((p) => p.role != GameRole.werewolf)
+              .toList();
+        case GameRole.seer:
+        case GameRole.bodyguard:
+        case GameRole.cupid:
+          // Can target any alive player
+          return alivePlayers;
+        case GameRole.witch:
+          // Witch can target any alive player (for poison)
+          // TODO: Heal action needs special handling (no target selection)
+          return alivePlayers;
+        default:
+          return [];
+      }
+    }
 
     switch (phase) {
       case GamePhase.werewolfPhase:
@@ -558,9 +827,18 @@ class GameProvider extends GetxController {
       case GamePhase.cupidPhase:
         // Cupid can choose any alive player
         return alivePlayers;
-      default:
-        // Most actions target any alive player
+      case GamePhase.seerPhase:
+      case GamePhase.bodyguardPhase:
+      case GamePhase.hunterPhase:
+      case GamePhase.dayVoting:
+      case GamePhase.finalVote:
+        // Can target any alive player
         return alivePlayers;
+      case GamePhase.witchPhase:
+        // Witch can target any alive player
+        return alivePlayers;
+      default:
+        return [];
     }
   }
 

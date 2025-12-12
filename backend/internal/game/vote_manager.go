@@ -59,9 +59,9 @@ func (vm *VoteManager) CastVote(ctx context.Context, sessionID, voterID, targetI
 		return fmt.Errorf("dead players cannot vote")
 	}
 
-	// Check if target is alive
+	// Check if target is alive (targetID is game_players.id, not user_id)
 	err = vm.db.QueryRow(ctx, `
-		SELECT is_alive FROM game_players WHERE session_id = $1 AND user_id = $2
+		SELECT is_alive FROM game_players WHERE session_id = $1 AND id = $2
 	`, sessionID, targetID).Scan(&isAlive)
 	if err != nil {
 		return fmt.Errorf("target not found: %w", err)
@@ -97,14 +97,8 @@ func (vm *VoteManager) CastVote(ctx context.Context, sessionID, voterID, targetI
 		return err
 	}
 
-	// Get target player ID
-	var targetPlayerID uuid.UUID
-	err = vm.db.QueryRow(ctx, `
-		SELECT id FROM game_players WHERE session_id = $1 AND user_id = $2
-	`, sessionID, targetID).Scan(&targetPlayerID)
-	if err != nil {
-		return err
-	}
+	// Get target player ID (targetID is already game_players.id)
+	targetPlayerID := targetID
 
 	_, err = vm.db.Exec(ctx, `
 		INSERT INTO game_actions (id, session_id, player_id, phase_number, action_type, target_player_id, action_data)

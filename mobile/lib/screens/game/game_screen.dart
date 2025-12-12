@@ -5,7 +5,9 @@ import '../../providers/game_provider.dart';
 import '../../providers/voice_provider.dart';
 import '../../models/models.dart';
 import '../../utils/theme.dart';
-import '../../services/storage_service.dart';
+import '../../widgets/game_state_tracker.dart';
+import '../../widgets/night_action_panel.dart';
+import '../../widgets/voting_panel.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
@@ -48,15 +50,8 @@ class _GameScreenState extends State<GameScreen> {
 
           return Column(
             children: [
-              // Phase header
-              _PhaseHeader(
-                phase: session.currentPhase,
-                dayNumber: session.dayNumber,
-                timeRemaining: gameProvider.phaseTimeRemaining.value,
-              ),
-
-              // Role card (shows your role)
-              if (myPlayer != null) _RoleCard(player: myPlayer),
+              // Game State Tracker (new comprehensive info widget)
+              const GameStateTracker(),
 
               // Voice controls
               _VoiceBar(),
@@ -66,9 +61,11 @@ class _GameScreenState extends State<GameScreen> {
                 child: _GameArea(session: session, myPlayer: myPlayer),
               ),
 
-              // Action panel
-              if (myPlayer != null && myPlayer.isAlive)
-                _ActionPanel(session: session, myPlayer: myPlayer),
+              // Action panels
+              if (myPlayer != null && myPlayer.isAlive) ...[
+                const NightActionPanel(),
+                const VotingPanel(),
+              ],
             ],
           );
         }),
@@ -330,7 +327,36 @@ class _GameArea extends StatelessWidget {
   void _selectPlayer(GamePlayer player) {
     final gameProvider = Get.find<GameProvider>();
     final phase = session.currentPhase;
+    final role = myPlayer?.role;
 
+    // Handle night_0 phase - route based on role
+    if (phase == GamePhase.night0) {
+      switch (role) {
+        case GameRole.werewolf:
+          gameProvider.werewolfVote(player.id);
+          break;
+        case GameRole.seer:
+          gameProvider.seerDivine(player.id);
+          break;
+        case GameRole.witch:
+          // Witch UI will need special handling (heal/poison buttons)
+          // For now, just log
+          print('Witch selected player: ${player.id}');
+          break;
+        case GameRole.bodyguard:
+          gameProvider.bodyguardProtect(player.id);
+          break;
+        case GameRole.cupid:
+          // Cupid needs to select TWO players - special handling needed
+          print('Cupid selected player: ${player.id}');
+          break;
+        default:
+          break;
+      }
+      return;
+    }
+
+    // Handle specific role phases
     switch (phase) {
       case GamePhase.werewolfPhase:
         gameProvider.werewolfVote(player.id);
@@ -379,15 +405,15 @@ class _PlayerCard extends StatelessWidget {
           color: !player.isAlive
               ? Colors.grey.withOpacity(0.3)
               : (isMe
-                    ? WolverixTheme.primaryColor.withOpacity(0.2)
-                    : WolverixTheme.cardColor),
+                  ? WolverixTheme.primaryColor.withOpacity(0.2)
+                  : WolverixTheme.cardColor),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: canSelect
                 ? WolverixTheme.primaryColor
                 : (isMe
-                      ? WolverixTheme.primaryColor.withOpacity(0.5)
-                      : Colors.transparent),
+                    ? WolverixTheme.primaryColor.withOpacity(0.5)
+                    : Colors.transparent),
             width: canSelect ? 2 : 1,
           ),
         ),
@@ -546,6 +572,24 @@ class _ActionPanel extends StatelessWidget {
       return 'Wait for your turn...';
     }
 
+    // Handle night_0 phase - show role-specific prompt
+    if (phase == GamePhase.night0) {
+      switch (role) {
+        case GameRole.werewolf:
+          return 'Choose a villager to eliminate';
+        case GameRole.seer:
+          return 'Choose a player to divine';
+        case GameRole.witch:
+          return 'Use your potions wisely';
+        case GameRole.bodyguard:
+          return 'Choose a player to protect';
+        case GameRole.cupid:
+          return 'Choose two players to become lovers';
+        default:
+          return 'Waiting for night actions...';
+      }
+    }
+
     switch (phase) {
       case GamePhase.werewolfPhase:
         return 'Choose a villager to eliminate';
@@ -580,8 +624,7 @@ class _GameOverScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final didWin =
-        myPlayer?.team?.name == winner ||
+    final didWin = myPlayer?.team?.name == winner ||
         (winner == 'lovers' && myPlayer?.loverId != null);
 
     return Container(

@@ -9,17 +9,15 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - SERVER_PORT=8080
-      - SERVER_HOST=0.0.0.0
-      - SERVER_ENV=development
-      - DATABASE_HOST=postgres
-      - DATABASE_PORT=5432
-      - DATABASE_USER=wolverix
-      - DATABASE_PASSWORD=wolverix_password
-      - DATABASE_NAME=wolverix
-      - DATABASE_SSL_MODE=disable
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - SERVER_ADDRESS=0.0.0.0:8080
+      - ENVIRONMENT=development
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=wolverix
+      - DB_PASSWORD=wolverix_password
+      - DB_NAME=wolverix
+      - DB_SSL_MODE=disable
+      - REDIS_ADDRESS=redis:6379
       - REDIS_PASSWORD=
       - REDIS_DB=0
       - JWT_SECRET=dev_jwt_secret_change_in_production

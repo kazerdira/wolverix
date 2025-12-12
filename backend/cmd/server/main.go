@@ -47,6 +47,8 @@ func main() {
 	gameEngine := game.NewEngine(db.PG)
 	agoraService := agora.NewService(&cfg.Agora)
 	wsHub := websocket.NewHub()
+	// Set WebSocket hub on game engine for phase change broadcasts
+	gameEngine.SetWebSocketHub(wsHub)
 
 	// Start WebSocket hub
 	ctx, cancel := context.WithCancel(context.Background())

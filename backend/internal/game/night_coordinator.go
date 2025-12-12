@@ -263,10 +263,11 @@ func (nc *NightCoordinator) ValidateAction(ctx context.Context, sessionID uuid.U
 		return fmt.Errorf("failed to get current phase: %w", err)
 	}
 
-	// Most night actions can only happen during night phase
-	if currentPhase != models.GamePhaseNight {
+	// Most night actions can only happen during night phase (including night_0)
+	isNightPhase := currentPhase == models.GamePhaseNight || currentPhase == models.GamePhaseNight0
+	if !isNightPhase {
 		if role != models.RoleHunter { // Hunter can shoot when they die (any phase)
-			return fmt.Errorf("this action can only be performed during night phase")
+			return fmt.Errorf("this action can only be performed during night phase (current: %s)", currentPhase)
 		}
 	}
 

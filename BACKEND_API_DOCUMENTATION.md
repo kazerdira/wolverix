@@ -467,6 +467,8 @@ Authorization: Bearer <token>
       "died_at_phase": null,
       "death_reason": null,
       "lover_id": null,
+      "current_voice_channel": "werewolf|main|dead|",
+      "allowed_chat_channels": ["werewolf"]|["main"]|["dead"]|[],
       "seat_position": 0,
       "user": {
         "id": "uuid",
@@ -483,7 +485,26 @@ Authorization: Bearer <token>
 **Role Visibility:**
 - Player sees only their own role
 - Dead players see all roles
+- Werewolves see other werewolves
+- Lovers see each other's roles
 - Game completed: all roles visible
+
+**Voice Channel Security:**
+
+The `current_voice_channel` and `allowed_chat_channels` fields control voice chat access:
+
+| Phase | Role | current_voice_channel | allowed_chat_channels | Description |
+|-------|------|----------------------|----------------------|-------------|
+| night_0, night_X | Werewolf | `"werewolf"` | `["werewolf"]` | Werewolves discuss privately |
+| night_0, night_X | Non-werewolf | `""` (empty) | `[]` (empty) | Silenced during night |
+| day_discussion, day_voting | All alive | `"main"` | `["main"]` | Public discussion |
+| any | Dead player | `"dead"` | `["dead"]` | Dead players' channel |
+
+**Channel Isolation Rules:**
+- Empty `allowed_chat_channels` means player cannot send/receive voice
+- Frontend MUST enforce these restrictions
+- Channels updated automatically on phase transitions
+- Security-critical: prevents werewolves from being overheard
 
 ### Perform Action
 ```http
@@ -594,6 +615,47 @@ Content-Type: application/json
 - Format: `room_{room_id_prefix}`
 - Auto-generated on room creation
 - Unique per room
+
+### Voice Channel Isolation (Critical Security Feature)
+
+The backend manages voice channel access through the `allowed_chat_channels` field in game state. This ensures game integrity by controlling who can hear whom.
+
+**Implementation Requirements:**
+
+1. **Frontend Integration:**
+   ```dart
+   // Check game state for voice permissions
+   final gameState = await getGameState(sessionId);
+   final myPlayer = gameState.players.firstWhere((p) => p.userId == myUserId);
+   final allowedChannels = myPlayer.allowedChatChannels; // ["werewolf"], ["main"], ["dead"], or []
+   
+   // Enforce in Agora:
+   if (allowedChannels.isEmpty) {
+     // Mute microphone, disable voice UI
+     await agoraEngine.muteLocalAudioStream(true);
+   } else {
+     // Join allowed channel(s)
+     final channelName = allowedChannels.first;
+     await agoraEngine.joinChannel(token, channelName, null, uid);
+   }
+   ```
+
+2. **Channel Types:**
+   - `werewolf`: Werewolves-only night discussion
+   - `main`: All alive players during day phases
+   - `dead`: Deceased players (spectator channel)
+
+3. **Security Notes:**
+   - Backend updates channels on every phase transition
+   - Client must poll game state or use WebSocket for updates
+   - Always check `allowed_chat_channels` before enabling voice
+   - Empty array = player is silenced (cannot talk or listen)
+
+**Testing:**
+- Verified with `test_voice_channels.ps1`
+- Night isolation: ✓ Werewolves private, others silenced
+- Day open: ✓ All alive players share main channel
+- Critical for preventing cheating
 
 ---
 

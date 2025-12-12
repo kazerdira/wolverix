@@ -47,98 +47,108 @@ type HunterShotResult struct {
 }
 
 // ProcessDeath handles a player death and all cascading effects
+// Uses a queue-based approach to avoid nested transactions
 func (dr *DeathResolver) ProcessDeath(ctx context.Context, death DeathContext) (*DeathResult, error) {
-	tx, err := dr.db.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
 	result := &DeathResult{
-		DeadPlayers:   []uuid.UUID{death.PlayerID},
+		DeadPlayers:   []uuid.UUID{},
 		RolesRevealed: make(map[uuid.UUID]models.Role),
 	}
 
-	// Get player info
-	player, err := dr.getPlayer(ctx, tx, death.SessionID, death.PlayerID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get player: %w", err)
-	}
+	// Queue of deaths to process
+	deathQueue := []DeathContext{death}
+	processedDeaths := make(map[uuid.UUID]bool)
 
-	// Check if already dead
-	if !player.IsAlive {
-		return result, nil // Already dead, no-op
-	}
+	// Process deaths in queue until empty
+	for len(deathQueue) > 0 {
+		currentDeath := deathQueue[0]
+		deathQueue = deathQueue[1:]
 
-	// Mark player as dead
-	if err := dr.markPlayerDead(ctx, tx, death); err != nil {
-		return nil, fmt.Errorf("failed to mark player dead: %w", err)
-	}
-
-	// Update alive counts
-	if err := dr.updateAliveCounts(ctx, tx, death.SessionID, player.Team); err != nil {
-		return nil, fmt.Errorf("failed to update alive counts: %w", err)
-	}
-
-	// Reveal role
-	result.RolesRevealed[death.PlayerID] = player.Role
-
-	// Create death event
-	if err := dr.createDeathEvent(ctx, tx, death, player.Role); err != nil {
-		return nil, fmt.Errorf("failed to create death event: %w", err)
-	}
-
-	// Handle Hunter death trigger
-	if player.Role == models.RoleHunter && !player.RoleState.HasShot {
-		hunterShot, err := dr.handleHunterDeath(ctx, tx, death.SessionID, death.PlayerID, death.PhaseNumber)
-		if err != nil {
-			return nil, fmt.Errorf("failed to handle hunter death: %w", err)
+		// Skip if already processed
+		if processedDeaths[currentDeath.PlayerID] {
+			continue
 		}
-		result.HunterShot = hunterShot
 
-		// If hunter shot someone, recursively process that death
-		if hunterShot.TargetID != nil {
-			targetDeath := DeathContext{
-				SessionID:   death.SessionID,
-				PlayerID:    *hunterShot.TargetID,
-				DeathReason: "hunter_shot",
-				PhaseNumber: death.PhaseNumber,
-				KillerID:    &death.PlayerID,
-			}
-			targetResult, err := dr.ProcessDeath(ctx, targetDeath)
+		// Process this death in its own transaction
+		tx, err := dr.db.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		}
+
+		// Get player info
+		player, err := dr.getPlayer(ctx, tx, currentDeath.SessionID, currentDeath.PlayerID)
+		if err != nil {
+			tx.Rollback(ctx)
+			return nil, fmt.Errorf("failed to get player: %w", err)
+		}
+
+		// Check if already dead
+		if !player.IsAlive {
+			tx.Rollback(ctx)
+			processedDeaths[currentDeath.PlayerID] = true
+			continue
+		}
+
+		// Mark player as dead
+		if err := dr.markPlayerDead(ctx, tx, currentDeath); err != nil {
+			tx.Rollback(ctx)
+			return nil, fmt.Errorf("failed to mark player dead: %w", err)
+		}
+
+		// Update alive counts
+		if err := dr.updateAliveCounts(ctx, tx, currentDeath.SessionID, player.Team); err != nil {
+			tx.Rollback(ctx)
+			return nil, fmt.Errorf("failed to update alive counts: %w", err)
+		}
+
+		// Reveal role
+		result.RolesRevealed[currentDeath.PlayerID] = player.Role
+		result.DeadPlayers = append(result.DeadPlayers, currentDeath.PlayerID)
+
+		// Create death event
+		if err := dr.createDeathEvent(ctx, tx, currentDeath, player.Role); err != nil {
+			tx.Rollback(ctx)
+			return nil, fmt.Errorf("failed to create death event: %w", err)
+		}
+
+		// Handle Hunter death trigger
+		if player.Role == models.RoleHunter && !player.RoleState.HasShot {
+			hunterShot, err := dr.handleHunterDeath(ctx, tx, currentDeath.SessionID, currentDeath.PlayerID, currentDeath.PhaseNumber)
 			if err != nil {
-				return nil, fmt.Errorf("failed to process hunter shot death: %w", err)
+				tx.Rollback(ctx)
+				return nil, fmt.Errorf("failed to handle hunter death: %w", err)
 			}
-			// Merge results
-			result.DeadPlayers = append(result.DeadPlayers, targetResult.DeadPlayers...)
-			for k, v := range targetResult.RolesRevealed {
-				result.RolesRevealed[k] = v
+			result.HunterShot = hunterShot
+
+			// Add hunter shot target to queue
+			if hunterShot.TargetID != nil {
+				deathQueue = append(deathQueue, DeathContext{
+					SessionID:   currentDeath.SessionID,
+					PlayerID:    *hunterShot.TargetID,
+					DeathReason: "hunter_shot",
+					PhaseNumber: currentDeath.PhaseNumber,
+					KillerID:    &currentDeath.PlayerID,
+				})
 			}
 		}
-	}
 
-	// Handle Lover cascade
-	if !death.BypassLover && player.LoverID != nil {
-		loverDeath := DeathContext{
-			SessionID:   death.SessionID,
-			PlayerID:    *player.LoverID,
-			DeathReason: "lover_death",
-			PhaseNumber: death.PhaseNumber,
-			BypassLover: true, // Prevent infinite loop
+		// Handle Lover cascade
+		if !currentDeath.BypassLover && player.LoverID != nil {
+			result.LoverDeaths = append(result.LoverDeaths, *player.LoverID)
+			deathQueue = append(deathQueue, DeathContext{
+				SessionID:   currentDeath.SessionID,
+				PlayerID:    *player.LoverID,
+				DeathReason: "lover_death",
+				PhaseNumber: currentDeath.PhaseNumber,
+				BypassLover: true, // Prevent infinite loop
+			})
 		}
-		loverResult, err := dr.ProcessDeath(ctx, loverDeath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to process lover death: %w", err)
-		}
-		result.LoverDeaths = loverResult.DeadPlayers
-		result.DeadPlayers = append(result.DeadPlayers, loverResult.DeadPlayers...)
-		for k, v := range loverResult.RolesRevealed {
-			result.RolesRevealed[k] = v
-		}
-	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		// Commit this death's transaction
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		}
+
+		processedDeaths[currentDeath.PlayerID] = true
 	}
 
 	return result, nil

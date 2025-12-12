@@ -88,13 +88,13 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 		req.Language = "en"
 	}
 	if req.Config.DayPhaseSeconds == 0 {
-		req.Config.DayPhaseSeconds = 120
+		req.Config.DayPhaseSeconds = 300 // 5 minutes for day discussion
 	}
 	if req.Config.NightPhaseSeconds == 0 {
-		req.Config.NightPhaseSeconds = 60
+		req.Config.NightPhaseSeconds = 120 // 2 minutes for night actions
 	}
 	if req.Config.VotingSeconds == 0 {
-		req.Config.VotingSeconds = 60
+		req.Config.VotingSeconds = 60 // 1 minute for voting
 	}
 
 	log.Printf("✓ CreateRoom - After defaults: maxPlayers=%d, language=%s", req.MaxPlayers, req.Language)
@@ -845,16 +845,22 @@ func (h *Handler) PerformAction(c *gin.Context) {
 
 	var req models.GameActionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("❌ PerformAction - JSON bind error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("🎮 PerformAction - User: %s, Action: %s, Target: %v", userID, req.ActionType, req.TargetID)
+
 	ctx := context.Background()
 	err = h.gameEngine.ProcessAction(ctx, sessionID, userID.(uuid.UUID), req)
 	if err != nil {
+		log.Printf("❌ PerformAction - ProcessAction error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	log.Printf("✅ PerformAction - Action %s completed successfully", req.ActionType)
 
 	// Get room ID for broadcast
 	session, _ := h.gameEngine.GetGameState(ctx, sessionID)
@@ -1045,19 +1051,36 @@ func filterSessionForPlayer(session *models.GameSession, userID uuid.UUID) *mode
 	// Create a copy of the session
 	filtered := *session
 
-	// Clear sensitive state info
+	// Create a copy of state to avoid modifying the original
+	stateCopy := session.State
+	filtered.State = stateCopy
+
+	// Clear sensitive state info by default
 	filtered.State.WerewolfVotes = nil
 	filtered.State.PoisonedPlayer = nil
 	filtered.State.HealedPlayer = nil
 	filtered.State.ProtectedPlayer = nil
 
-	// Find requesting player
+	// Find requesting player and index
 	var requestingPlayer *models.GamePlayer
+	var requestingPlayerIdx int = -1
 	for i := range session.Players {
 		if session.Players[i].UserID == userID {
 			requestingPlayer = &session.Players[i]
+			requestingPlayerIdx = i
 			break
 		}
+	}
+
+	// Check if this is night phase (use session.CurrentPhase, not state)
+	isNightPhase := filtered.CurrentPhase == models.GamePhaseNight0 ||
+		filtered.CurrentPhase == models.GamePhaseNight ||
+		(len(filtered.CurrentPhase) > 5 && string(filtered.CurrentPhase)[:5] == "night")
+
+	// Calculate provisional victim if it's night (for Witch visibility)
+	var provisionalVictim *uuid.UUID
+	if isNightPhase {
+		provisionalVictim = calculateProvisionalVictim(session.State.WerewolfVotes)
 	}
 
 	// Filter player info based on what requesting player should see
@@ -1071,6 +1094,7 @@ func filterSessionForPlayer(session *models.GameSession, userID uuid.UUID) *mode
 			DiedAtPhase:         p.DiedAtPhase,
 			DeathReason:         p.DeathReason,
 			CurrentVoiceChannel: p.CurrentVoiceChannel,
+			AllowedChatChannels: p.AllowedChatChannels,
 			SeatPosition:        p.SeatPosition,
 			User:                p.User,
 		}
@@ -1090,6 +1114,17 @@ func filterSessionForPlayer(session *models.GameSession, userID uuid.UUID) *mode
 			filteredPlayers[i].Team = p.Team
 		}
 
+		// If this is the requesting player, copy their full role state
+		if p.UserID == userID {
+			filteredPlayers[i].RoleState = p.RoleState
+
+			// CRITICAL: If player is Witch and it's night, show the current victim
+			if requestingPlayer != nil && requestingPlayer.Role == models.RoleWitch &&
+				isNightPhase && !p.RoleState.HealUsed && provisionalVictim != nil {
+				filteredPlayers[i].RoleState.CurrentNightVictim = provisionalVictim
+			}
+		}
+
 		// Show lover if requesting player is the lover
 		if requestingPlayer != nil && requestingPlayer.LoverID != nil && *requestingPlayer.LoverID == p.ID {
 			filteredPlayers[i].LoverID = p.LoverID
@@ -1097,5 +1132,34 @@ func filterSessionForPlayer(session *models.GameSession, userID uuid.UUID) *mode
 	}
 	filtered.Players = filteredPlayers
 
+	// Suppress unused variable warning
+	_ = requestingPlayerIdx
+
 	return &filtered
+}
+
+// calculateProvisionalVictim finds the player with the most werewolf votes
+func calculateProvisionalVictim(votes map[string]int) *uuid.UUID {
+	if votes == nil || len(votes) == 0 {
+		return nil
+	}
+
+	var maxVotes int
+	var victimID string
+	for playerID, count := range votes {
+		if count > maxVotes {
+			maxVotes = count
+			victimID = playerID
+		}
+	}
+
+	if victimID == "" {
+		return nil
+	}
+
+	parsed, err := uuid.Parse(victimID)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }

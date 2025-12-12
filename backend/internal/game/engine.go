@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kazerdira/wolverix/backend/internal/models"
@@ -22,6 +23,12 @@ type Engine struct {
 	nightCoord    *NightCoordinator
 	voteManager   *VoteManager
 	scheduler     *GameScheduler
+	wsHub         WebSocketHub
+}
+
+// WebSocketHub interface for broadcasting messages
+type WebSocketHub interface {
+	BroadcastToRoom(roomID uuid.UUID, messageType models.WSMessageType, payload interface{})
 }
 
 // NewEngine creates a new game engine with all subsystems
@@ -52,6 +59,11 @@ func NewEngine(db *pgxpool.Pool) *Engine {
 // GetScheduler returns the game scheduler
 func (e *Engine) GetScheduler() *GameScheduler {
 	return e.scheduler
+}
+
+// SetWebSocketHub sets the WebSocket hub for broadcasting
+func (e *Engine) SetWebSocketHub(hub WebSocketHub) {
+	e.wsHub = hub
 }
 
 // StartGame initializes a new game session from a room
@@ -127,13 +139,28 @@ func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameS
 		return nil, fmt.Errorf("failed to assign roles: %w", err)
 	}
 
+	// Build initial ActionsRemaining based on assigned roles
+	actionsRemaining := make(map[string]int)
+	for _, assignment := range roleAssignments.Assignments {
+		switch assignment.Role {
+		case models.RoleWerewolf, models.RoleSeer, models.RoleWitch, models.RoleBodyguard, models.RoleCupid:
+			actionsRemaining[string(assignment.Role)] = 1
+		}
+	}
+
 	// Create game session
 	sessionID := uuid.New()
 	now := time.Now()
-	phaseEndsAt := now.Add(2 * time.Minute) // Initial night phase
+
+	nightDuration := 120 // Default 2 minutes
+	if room.Config.NightPhaseSeconds > 0 {
+		nightDuration = room.Config.NightPhaseSeconds
+	}
+	fmt.Printf("DEBUG: Starting game with NightPhaseSeconds=%d\n", nightDuration)
+	phaseEndsAt := now.Add(time.Duration(nightDuration) * time.Second)
 
 	initialState := models.GameState{
-		ActionsRemaining: make(map[string]int),
+		ActionsRemaining: actionsRemaining,
 		ActionsCompleted: make(map[string]bool),
 		RevealedRoles:    make(map[string]string),
 		WerewolfVotes:    make(map[string]int),
@@ -199,9 +226,16 @@ func (e *Engine) StartGame(ctx context.Context, roomID uuid.UUID) (*models.GameS
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Schedule automatic transition to day phase (2 minute initial night)
+	// Schedule automatic transition to day phase
 	if e.scheduler != nil {
-		e.scheduler.SchedulePhaseEnd(sessionID, 2*time.Minute)
+		e.scheduler.SchedulePhaseEnd(sessionID, time.Duration(nightDuration)*time.Second)
+	}
+
+	// Update voice channels for initial night phase (werewolves get private channel)
+	if e.phaseManager != nil {
+		if err := e.phaseManager.UpdateVoiceChannels(ctx, sessionID, models.GamePhaseNight); err != nil {
+			log.Printf("Warning: failed to update voice channels on game start: %v", err)
+		}
 	}
 
 	// Return the created session
@@ -260,21 +294,51 @@ func (e *Engine) TransitionPhase(ctx context.Context, sessionID uuid.UUID) (*Pha
 	}
 
 	// Transition based on current phase
+	var transition *PhaseTransition
+
 	switch currentPhase {
 	case models.GamePhaseNight:
-		return e.phaseManager.TransitionToDay(ctx, sessionID)
+		transition, err = e.phaseManager.TransitionToDay(ctx, sessionID)
 	case models.GamePhaseDay:
-		return e.phaseManager.TransitionToVoting(ctx, sessionID)
+		transition, err = e.phaseManager.TransitionToVoting(ctx, sessionID)
 	case models.GamePhaseVoting:
 		// Tally votes first
-		voteResult, err := e.voteManager.TallyVotes(ctx, sessionID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to tally votes: %w", err)
+		voteResult, voteErr := e.voteManager.TallyVotes(ctx, sessionID)
+		if voteErr != nil {
+			return nil, fmt.Errorf("failed to tally votes: %w", voteErr)
 		}
-		return e.phaseManager.TransitionToNight(ctx, sessionID, voteResult.LynchedPlayerID)
+		transition, err = e.phaseManager.TransitionToNight(ctx, sessionID, voteResult.LynchedPlayerID)
 	default:
 		return nil, fmt.Errorf("invalid phase for transition: %s", currentPhase)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Broadcast phase change to all players in the room
+	if e.wsHub != nil && transition != nil {
+		// Get room ID and phase_ends_at from session
+		var roomID uuid.UUID
+		var phaseEndsAt time.Time
+		err = e.db.QueryRow(ctx, `SELECT room_id, phase_ends_at FROM game_sessions WHERE id = $1`, sessionID).Scan(&roomID, &phaseEndsAt)
+		if err == nil {
+			log.Printf("[Engine] Broadcasting phase change: %s -> %s to room %s", transition.FromPhase, transition.ToPhase, roomID)
+			e.wsHub.BroadcastToRoom(roomID, models.WSTypePhaseChange, gin.H{
+				"session_id":     sessionID,
+				"from_phase":     transition.FromPhase,
+				"to_phase":       transition.ToPhase,
+				"phase":          string(transition.ToPhase), // Frontend expects 'phase' field
+				"phase_number":   transition.PhaseNumber,
+				"day_number":     transition.DayNumber,
+				"phase_end_time": phaseEndsAt.Format(time.RFC3339),
+				"message":        transition.Message,
+				"deaths":         transition.Deaths,
+			})
+		}
+	}
+
+	return transition, nil
 }
 
 // CheckPhaseTimeout checks if current phase has timed out
@@ -311,7 +375,7 @@ func (e *Engine) GetGameState(ctx context.Context, sessionID uuid.UUID) (*models
 	rows, err := e.db.Query(ctx, `
 		SELECT gp.id, gp.session_id, gp.user_id, gp.role, gp.team, gp.is_alive,
 		       gp.died_at_phase, gp.death_reason, gp.lover_id, gp.current_voice_channel,
-		       gp.seat_position, gp.role_state,
+		       gp.allowed_chat_channels, gp.seat_position, gp.role_state,
 		       u.username, u.avatar_url
 		FROM game_players gp
 		JOIN users u ON gp.user_id = u.id
@@ -328,16 +392,26 @@ func (e *Engine) GetGameState(ctx context.Context, sessionID uuid.UUID) (*models
 		var roleStateJSON []byte
 		var username string
 		var avatarURL *string
+		var allowedChannels []string
 
 		err := rows.Scan(
 			&player.ID, &player.SessionID, &player.UserID, &player.Role, &player.Team,
 			&player.IsAlive, &player.DiedAtPhase, &player.DeathReason, &player.LoverID,
-			&player.CurrentVoiceChannel, &player.SeatPosition, &roleStateJSON,
-			&username, &avatarURL,
+			&player.CurrentVoiceChannel, &allowedChannels, &player.SeatPosition,
+			&roleStateJSON, &username, &avatarURL,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan player: %w", err)
 		}
+
+		// Explicitly copy allowed channels (handle nil -> empty slice)
+		if allowedChannels == nil {
+			player.AllowedChatChannels = []string{}
+		} else {
+			player.AllowedChatChannels = allowedChannels
+		}
+
+		log.Printf("DEBUG Player %s: channels=%v (nil=%v)", username, player.AllowedChatChannels, allowedChannels == nil)
 
 		// Parse role state
 		if len(roleStateJSON) > 0 {
